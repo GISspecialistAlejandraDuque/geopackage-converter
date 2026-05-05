@@ -1,0 +1,19 @@
+[general]
+name=GeoPackage Converter
+qgisMinimumVersion=3.34
+qgisMaximumVersion=4.99
+supportsQt6=True
+description=Batch convert vector files (SHP, TAB, KML, GML, GeoJSON, DXF, GPX, MIF, ZIP) to GeoPackage — from project or folder.
+about=GeoPackage Converter converts vector files to GeoPackage in two modes: "From project" (preserving symbology from the active QGIS project) and "From folder" (recursive scan with automatic ZIP support via GDAL /vsizip/). Features: batch conversion of mixed formats, grouping strategies (all-in-one, per subfolder, per legend group, mirror folder structure), optional CRS reprojection with native QGIS selector, automatic encoding detection for shapefiles, style preservation inside GeoPackage, geometry validation, dry-run preview, background execution, HTML report, and Processing algorithms for automation. Works on any country and CRS. UI available in Italian, English and Spanish. Compatible with QGIS 3.34+ (Qt5) and 4.0+ (Qt6). --- Converte file vettoriali in GeoPackage con due modalità: "Da progetto" (preservando la simbologia) e "Da cartella" (scansione ricorsiva con supporto ZIP). Conversione batch di formati misti, strategie di raggruppamento, riproiezione CRS, rilevamento encoding automatico, salvataggio stili, validazione geometrie, dry-run, esecuzione in background, report HTML e algoritmi di Processing.
+version=0.1.0
+author=GIS Specialist di Alejandra Duque Ropero
+email=alejandra.duque@gisspecialist.it
+tracker=https://github.com/GISspecialistAlejandraDuque/geopackage-converter/issues
+repository=https://github.com/GISspecialistAlejandraDuque/geopackage-converter
+homepage=https://github.com/GISspecialistAlejandraDuque/geopackage-converter
+category=Vector
+icon=resources/icons/icon.svg
+experimental=False
+deprecated=False
+changelog=0.1.0 - Initial release: batch conversion from project and folder, grouping strategies, CRS reprojection, style preservation, HTML report, Processing algorithms, i18n (IT/EN/ES).
+tags=geopackage,shapefile,conversion,batch,migration,vector,export,format,kml,gml,geojson,dxf,gpx,zip
