@@ -1,11 +1,12 @@
 """
-Filesystem scanner for vector sources.
+Filesystem scanner for vector and raster sources.
 
 Walks a folder (optionally recursive), filters by supported extension,
 and returns one metadata dict per file. The QGIS-dependent inspection
-step is isolated in `_inspect_with_qgis()`, which is the only thing that
-needs `qgis.core`. Tests monkeypatch that function so the rest of the
-module stays unit-testable without a running QGIS (Rule 4).
+step is isolated in `_inspect_with_qgis()` / `_inspect_raster_with_qgis()`,
+which are the only things that need `qgis.core`. Tests monkeypatch those
+functions so the rest of the module stays unit-testable without a
+running QGIS (Rule 4).
 """
 
 from __future__ import annotations
@@ -32,6 +33,17 @@ SUPPORTED_EXTENSIONS: Dict[str, str] = {
     ".dxf": "dxf",
     ".gpx": "gpx",
     ".mif": "mif",
+}
+
+# Raster extensions -> short format key.
+SUPPORTED_RASTER_EXTENSIONS: Dict[str, str] = {
+    ".tif": "geotiff",
+    ".tiff": "geotiff",
+    ".jp2": "jp2",
+    ".ecw": "ecw",
+    ".img": "img",
+    ".asc": "asc",
+    ".vrt": "vrt",
 }
 
 # Archives expanded virtually via GDAL's /vsizip/ filesystem.
@@ -100,6 +112,7 @@ def _iter_zip_vector_entries(zip_path: Path) -> Iterable[Dict[str, object]]:
             "path": zip_path,
             "format": "zip",
             "name": zip_path.stem,
+            "item_type": "vector",
             "geometry_type": "Unknown",
             "crs": "Unknown",
             "feature_count": 0,
@@ -133,6 +146,7 @@ def _iter_zip_vector_entries(zip_path: Path) -> Iterable[Dict[str, object]]:
             "uri": uri,
             "format": SUPPORTED_EXTENSIONS[ext],
             "name": layer_name,
+            "item_type": "vector",
             "is_virtual": True,
             "archive": zip_path,
             "subfolder": parent_label,
@@ -205,6 +219,63 @@ def _inspect_with_qgis(path) -> Dict[str, object]:
     }
 
 
+def _inspect_raster_with_qgis(path) -> Dict[str, object]:
+    """
+    Open `path` with QgsRasterLayer and extract metadata.
+
+    Returns a dict with keys: width, height, band_count, crs, warnings.
+    Never raises — failures are reported via the `warnings` list.
+    """
+    warnings: List[str] = []
+    width = height = band_count = 0
+    crs_id = "Unknown"
+
+    try:
+        from qgis.core import QgsRasterLayer
+    except ImportError:
+        warnings.append("QGIS core not available; metadata limited to filename")
+        return {
+            "width": width,
+            "height": height,
+            "band_count": band_count,
+            "crs": crs_id,
+            "warnings": warnings,
+        }
+
+    source = str(path)
+    name = Path(source).stem
+    layer = QgsRasterLayer(source, name)
+    if not layer.isValid():
+        warnings.append("Raster invalid or unreadable by GDAL")
+        return {
+            "width": width,
+            "height": height,
+            "band_count": band_count,
+            "crs": crs_id,
+            "warnings": warnings,
+        }
+
+    width = layer.width()
+    height = layer.height()
+    band_count = layer.bandCount()
+
+    crs = layer.crs()
+    if crs.isValid():
+        auth = crs.authid()
+        crs_id = auth if auth else crs.description() or "Unknown"
+    else:
+        warnings.append("CRS not recognised")
+        crs_id = "Unknown"
+
+    return {
+        "width": width,
+        "height": height,
+        "band_count": band_count,
+        "crs": crs_id,
+        "warnings": warnings,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -220,7 +291,7 @@ def _iter_candidate_files(root: Path, recursive: bool) -> Iterable[Path]:
     `°`, `&` or non-ASCII punctuation: `rglob('*')` silently fails to
     descend past the offending segment. `os.walk` walks correctly.
     """
-    accepted = set(SUPPORTED_EXTENSIONS) | _ARCHIVE_EXTENSIONS
+    accepted = set(SUPPORTED_EXTENSIONS) | set(SUPPORTED_RASTER_EXTENSIONS) | _ARCHIVE_EXTENSIONS
     walk_root = _long_path(root)
     if recursive:
         for dirpath, _dirs, filenames in os.walk(walk_root):
@@ -248,7 +319,7 @@ def scan_folder(
     mirror_hierarchy: bool = False,
 ) -> List[Dict[str, object]]:
     """
-    Scan `path` for supported vector files and return metadata for each.
+    Scan `path` for supported vector and raster files and return metadata for each.
 
     Args:
         path: directory to scan.
@@ -321,7 +392,34 @@ def scan_folder(
                 results.append(entry)
             continue
 
-        # Regular file on disk.
+        # Raster file on disk.
+        if ext in SUPPORTED_RASTER_EXTENSIONS:
+            fmt = SUPPORTED_RASTER_EXTENSIONS[ext]
+            meta = _inspect_raster_with_qgis(file_path)
+            warnings_list: List[str] = list(meta.get("warnings") or [])
+            w = meta.get("width", 0)
+            h = meta.get("height", 0)
+            bands = meta.get("band_count", 0)
+            results.append(
+                {
+                    "path": file_path,
+                    "format": fmt,
+                    "name": file_path.stem,
+                    "item_type": "raster",
+                    "geometry_type": "Raster",
+                    "crs": meta["crs"],
+                    "feature_count": 0,
+                    "raster_width": w,
+                    "raster_height": h,
+                    "band_count": bands,
+                    "encoding": "N/A",
+                    "warnings": warnings_list,
+                    "subfolder": _subfolder_label(file_path),
+                }
+            )
+            continue
+
+        # Regular vector file on disk.
         fmt = SUPPORTED_EXTENSIONS[ext]
         encoding = _detect_encoding_safe(file_path, ext)
         meta = _inspect_with_qgis(file_path)
@@ -336,6 +434,7 @@ def scan_folder(
                 "path": file_path,
                 "format": fmt,
                 "name": file_path.stem,
+                "item_type": "vector",
                 "geometry_type": meta["geometry_type"],
                 "crs": meta["crs"],
                 "feature_count": meta["feature_count"],
@@ -360,4 +459,4 @@ def _detect_encoding_safe(file_path: Path, ext: str) -> Optional[str]:
         return None
 
 
-__all__ = ["scan_folder", "SUPPORTED_EXTENSIONS"]
+__all__ = ["scan_folder", "SUPPORTED_EXTENSIONS", "SUPPORTED_RASTER_EXTENSIONS"]

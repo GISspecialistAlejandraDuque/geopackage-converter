@@ -29,10 +29,15 @@ class CRSError(GeoPackageConverterError):
     """Raised for invalid, unknown, or unresolvable CRS references."""
 
 
+class RasterConversionError(GeoPackageConverterError):
+    """Raised when writing a raster layer to the GeoPackage fails."""
+
+
 __all__ = [
     "GeoPackageConverterError",
     "InvalidSourceError",
     "ConversionError",
+    "RasterConversionError",
     "EncodingDetectionError",
     "CRSError",
 ]

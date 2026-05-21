@@ -43,6 +43,7 @@ def apply_grouping(
     strategy_index: int,
     items: list,
     output_path: Path,
+    project_name: str = "",
 ) -> List[dict]:
     """
     Dispatch on `strategy_index`. For "all in one" the path must be a
@@ -54,7 +55,7 @@ def apply_grouping(
     if strategy_index == GROUPING_BY_SUBFOLDER:
         return group_by_subfolder(items, base)
     if strategy_index == GROUPING_BY_LEGEND_GROUP:
-        return group_by_legend_group(items, base)
+        return group_by_legend_group(items, base, project_name=project_name)
     raise ValueError(f"Unknown grouping strategy index: {strategy_index}")
 
 

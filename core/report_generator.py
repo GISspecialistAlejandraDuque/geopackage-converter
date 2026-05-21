@@ -56,6 +56,8 @@ _I18N = {
         "message": "Messaggio",
         "no_warnings": "Nessun avviso.",
         "title": "Report di conversione GeoPackage Converter",
+        "vectors": "vettoriali",
+        "rasters": "raster",
     },
     "es": {
         "no_files": "No se generaron archivos.",
@@ -64,6 +66,8 @@ _I18N = {
         "message": "Mensaje",
         "no_warnings": "Sin avisos.",
         "title": "Reporte de conversión GeoPackage Converter",
+        "vectors": "vectoriales",
+        "rasters": "ráster",
     },
     "en": {
         "no_files": "No files generated.",
@@ -72,6 +76,8 @@ _I18N = {
         "message": "Message",
         "no_warnings": "No warnings.",
         "title": "GeoPackage Converter Conversion Report",
+        "vectors": "vector",
+        "rasters": "raster",
     },
 }
 
@@ -113,6 +119,22 @@ def _render_errors_table(result: ConversionResult) -> str:
         f"<table><thead><tr><th>{_t('source')}</th><th>{_t('message')}</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
     )
+
+
+def _render_detail_breakdown(result: ConversionResult) -> str:
+    """Render a one-line vector/raster breakdown when both types are present."""
+    v = result.vector_success_count
+    r = result.raster_success_count
+    if v == 0 and r == 0:
+        return ""
+    parts = []
+    if v:
+        parts.append(f"{v} {_t('vectors')}")
+    if r:
+        parts.append(f"{r} {_t('rasters')}")
+    if len(parts) < 2:
+        return ""  # no breakdown needed when only one type
+    return f'<p style="color:#486581; margin-top:-0.5em;">{" + ".join(parts)}</p>'
 
 
 def _render_warnings_list(result: ConversionResult) -> str:
@@ -162,6 +184,7 @@ def generate_html_report(
         "{{OUTPUT_FILES}}": _render_output_files(result),
         "{{ERRORS_TABLE}}": _render_errors_table(result),
         "{{WARNINGS_LIST}}": _render_warnings_list(result),
+        "{{DETAIL_BREAKDOWN}}": _render_detail_breakdown(result),
     }
     rendered = template
     for token, value in substitutions.items():

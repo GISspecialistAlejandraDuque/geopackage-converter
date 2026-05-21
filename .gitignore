@@ -37,3 +37,8 @@ Thumbs.db
 
 # Packaging artifacts
 *.zip
+
+# Marketing / blog / promo (not part of the plugin)
+blog_article.*
+plugin_infographic.*
+reel_script.*

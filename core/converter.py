@@ -50,9 +50,16 @@ class ConversionResult:
     output_layers: List = field(default_factory=list)
     duration_seconds: float = 0.0
     dry_run: bool = False
+    # Per-type counters for the report breakdown.
+    vector_success_count: int = 0
+    raster_success_count: int = 0
 
-    def add_success(self, output_path: Path, layer_name: str = "") -> None:
+    def add_success(self, output_path: Path, layer_name: str = "", *, is_raster: bool = False) -> None:
         self.success_count += 1
+        if is_raster:
+            self.raster_success_count += 1
+        else:
+            self.vector_success_count += 1
         if output_path not in self.output_files:
             self.output_files.append(output_path)
         if layer_name:

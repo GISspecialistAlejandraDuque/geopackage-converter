@@ -192,20 +192,33 @@ def group_by_subfolder(
     return bundles
 
 
-def group_by_legend_group(items: List[Dict], output_dir: Path) -> List[Dict]:
+def group_by_legend_group(
+    items: List[Dict],
+    output_dir: Path,
+    project_name: str = "",
+) -> List[Dict]:
     """
     One GeoPackage per legend group (Mode A).
 
-    Items without a `legend_group` key (or with empty value) fall into
-    a single bundle named `ungrouped.gpkg`.
+    Items **with** a ``legend_group`` are bundled into one GPKG per
+    group (e.g. ``Idrologia.gpkg``).
+
+    Items **without** a group each get their own GPKG named after the
+    layer name (e.g. ``DTM_fvg_20m.gpkg``, ``Comuni FVG.gpkg``).
     """
     output_dir = Path(output_dir)
     buckets: OrderedDict[str, List[Dict]] = OrderedDict()
     for item in items:
         raw = item.get("legend_group")
         label = str(raw).strip() if raw else ""
-        token = _sanitize_for_filename(label, fallback="ungrouped") if label else "ungrouped"
-        buckets.setdefault(token, []).append(item)
+        if label:
+            token = _sanitize_for_filename(label, fallback="ungrouped")
+            buckets.setdefault(token, []).append(item)
+        else:
+            # Ungrouped: one GPKG per layer, named after the layer.
+            layer_name = str(item.get("name", "layer"))
+            token = _sanitize_for_filename(layer_name, fallback="ungrouped")
+            buckets.setdefault(token, []).append(item)
 
     return [
         _make_bundle(output_dir / f"{token}.gpkg", group_items)

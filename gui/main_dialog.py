@@ -27,6 +27,7 @@ from qgis.core import (
     QgsMapLayer,
     QgsMessageLog,
     QgsProject,
+    QgsRasterLayer,
     QgsTask,
     QgsVectorLayer,
 )
@@ -45,6 +46,7 @@ from qgis.PyQt.QtWidgets import (
 
 from ..compat import CHECKED, ITEM_IS_ENABLED, ITEM_IS_USER_CHECKABLE, UNCHECKED
 from ..core.converter import ConversionResult, Converter
+from ..core.raster_converter import RasterConverter
 from ..core.folder_scanner import scan_folder
 from ..core.grouping_strategies import (
     group_all_in_one,
@@ -114,12 +116,16 @@ class _ConversionTask(QgsTask):
         grouping_index: int,
         converter: Converter,
         mirror_layout: bool = False,
+        raster_converter: Optional[RasterConverter] = None,
+        project_name: str = "",
     ) -> None:
         super().__init__("GeoPackage Converter conversion", QgsTask.CanCancel)
         self._items = items
         self._output_path = output_path
         self._grouping_index = grouping_index
         self._converter = converter
+        self._raster_converter = raster_converter
+        self._project_name = project_name
         self._mirror_layout = mirror_layout
         self.result: Optional[ConversionResult] = None
         self.report_path: Optional[Path] = None
@@ -129,6 +135,47 @@ class _ConversionTask(QgsTask):
         out, self._log_lines = self._log_lines, []
         return out
 
+    def _merge_result(self, aggregate: ConversionResult, r: ConversionResult) -> None:
+        """Merge a per-bundle ConversionResult into the aggregate."""
+        aggregate.success_count += r.success_count
+        aggregate.vector_success_count += r.vector_success_count
+        aggregate.raster_success_count += r.raster_success_count
+        aggregate.error_count += r.error_count
+        aggregate.errors.extend(r.errors)
+        aggregate.output_layers.extend(r.output_layers)
+        for err in r.errors:
+            self._log_lines.append(
+                f"  ❌ {Path(err['source']).name}: {err['message']}"
+            )
+        aggregate.warnings.extend(r.warnings)
+        for p in r.output_files:
+            if p not in aggregate.output_files:
+                aggregate.output_files.append(p)
+        aggregate.duration_seconds += r.duration_seconds
+
+    @staticmethod
+    def _clean_stale_gpkg(output_path: Path) -> None:
+        """Remove a pre-existing GPKG and its SQLite sidecars.
+
+        Called for raster-only bundles (the vector converter does this
+        internally, but when there are no vectors we must do it here).
+        """
+        from ..core._paths import long_path
+
+        try:
+            lp = long_path(output_path)
+            if os.path.isfile(lp):
+                os.remove(lp)
+            for suffix in ("-shm", "-wal", "-journal"):
+                sidecar = long_path(Path(str(output_path) + suffix))
+                if os.path.isfile(sidecar):
+                    try:
+                        os.remove(sidecar)
+                    except OSError:
+                        pass
+        except OSError:
+            pass  # best-effort; converter will report write errors
+
     def _bundles(self):
         out = self._output_path
         if self._grouping_index == GROUPING_ALL_IN_ONE:
@@ -137,7 +184,7 @@ class _ConversionTask(QgsTask):
         if self._grouping_index == GROUPING_BY_SUBFOLDER:
             return group_by_subfolder(self._items, base, mirror_layout=self._mirror_layout)
         if self._grouping_index == GROUPING_BY_LEGEND_GROUP:
-            return group_by_legend_group(self._items, base)
+            return group_by_legend_group(self._items, base, project_name=self._project_name)
         raise ValueError(f"Unknown grouping index: {self._grouping_index}")
 
     def run(self) -> bool:  # noqa: D401
@@ -163,9 +210,18 @@ class _ConversionTask(QgsTask):
                 if self.isCanceled():
                     self._log_lines.append("Annullato dall'utente")
                     return False
+                # Partition items into vector and raster.
+                all_items = bundle["items"]
+                vector_items = [it for it in all_items if it.get("item_type", "vector") != "raster"]
+                raster_items = [it for it in all_items if it.get("item_type") == "raster"]
+
+                if raster_items:
+                    count_label = f"{len(vector_items)} vett. + {len(raster_items)} raster"
+                else:
+                    count_label = f"{len(all_items)} layer"
                 self._log_lines.append(
                     f"[{i}/{len(bundles)}] {bundle['output_path'].name} "
-                    f"({len(bundle['items'])} layer)"
+                    f"({count_label})"
                 )
 
                 def cb(percent: int, msg: str, _i=i, _n=len(bundles)) -> None:
@@ -175,20 +231,20 @@ class _ConversionTask(QgsTask):
                     if msg:
                         self._log_lines.append(f"  {msg}")
 
-                r = self._converter.convert(bundle["items"], bundle["output_path"], cb)
-                aggregate.success_count += r.success_count
-                aggregate.error_count += r.error_count
-                aggregate.errors.extend(r.errors)
-                aggregate.output_layers.extend(r.output_layers)
-                for err in r.errors:
-                    self._log_lines.append(
-                        f"  ❌ {Path(err['source']).name}: {err['message']}"
-                    )
-                aggregate.warnings.extend(r.warnings)
-                for p in r.output_files:
-                    if p not in aggregate.output_files:
-                        aggregate.output_files.append(p)
-                aggregate.duration_seconds += r.duration_seconds
+                # Convert vectors first (creates the GPKG — it wipes any
+                # pre-existing file internally).
+                if vector_items:
+                    r = self._converter.convert(vector_items, bundle["output_path"], cb)
+                    self._merge_result(aggregate, r)
+                elif raster_items:
+                    # Raster-only bundle: wipe stale GPKG so we don't
+                    # append into a file from a previous run.
+                    self._clean_stale_gpkg(bundle["output_path"])
+
+                # Then rasters (appended to the same GPKG).
+                if raster_items and self._raster_converter:
+                    r = self._raster_converter.convert(raster_items, bundle["output_path"], cb)
+                    self._merge_result(aggregate, r)
 
             self.result = aggregate
             report_dir = (
@@ -221,6 +277,7 @@ class GeoPackageConverterDialog(QDialog):
         self._task: Optional[_ConversionTask] = None
         self._scan_task: Optional[_ScanTask] = None
         self._scan_results: List[dict] = []
+        self._original_tree_snapshot: list = []
         self._last_output_dir: Optional[Path] = None
         self._last_report: Optional[Path] = None
         self._restoring_settings = False
@@ -251,7 +308,7 @@ class GeoPackageConverterDialog(QDialog):
         self.tabWidget.setTabText(0, self.tr("Da progetto"))
         self.tabWidget.setTabText(1, self.tr("Da cartella"))
         self.lblProjectHelp.setText(
-            self.tr("Seleziona i layer vettoriali del progetto da convertire in GeoPackage.")
+            self.tr("Seleziona i layer vettoriali e raster del progetto da convertire in GeoPackage.")
         )
         self.btnSelectAll.setText(self.tr("Seleziona tutto"))
         self.btnSelectNone.setText(self.tr("Deseleziona tutto"))
@@ -260,19 +317,23 @@ class GeoPackageConverterDialog(QDialog):
         self.chkMirrorStructure.setText(self.tr("Replica struttura su disco"))
         self.btnScan.setText(self.tr("Scansiona cartella"))
         self.tblFolderPreview.setHorizontalHeaderLabels([
-            self.tr("Nome"), self.tr("Formato"), self.tr("Geometria"),
-            self.tr("CRS"), self.tr("N° feature"), self.tr("Encoding"),
+            self.tr("Nome"), self.tr("Formato"), self.tr("Tipo"),
+            self.tr("CRS"), self.tr("Dettagli"), self.tr("Encoding"),
             self.tr("Avvisi"),
         ])
         self.grpOptions.setTitle(self.tr("Opzioni di conversione"))
         self.lblTargetCrs.setText(self.tr("CRS di destinazione:"))
         self.lblGrouping.setText(self.tr("Strategia di raggruppamento:"))
         self.chkSaveStyles.setText(self.tr("Salva stili"))
-        self.chkValidate.setText(self.tr("Valida geometrie"))
+        self.chkValidate.setText(self.tr("Valida geometrie (solo vettoriali)"))
         self.chkDryRun.setText(self.tr("Dry-run (anteprima)"))
         self.btnBrowseOutput.setText(self.tr("Sfoglia…"))
         self.btnOpenOutput.setText(self.tr("Apri cartella"))
         self.btnOpenReport.setText(self.tr("Apri report"))
+        self.lblRasterOptions.setText(self.tr("Opzioni raster:"))
+        self.lblTileFormat.setText(self.tr("Formato tile:"))
+        self.lblTileSize.setText(self.tr("Tile:"))
+        self.lblJpegQuality.setText(self.tr("Qualità:"))
         self.btnRun.setText(self.tr("Esegui"))
         self.btnCancel.setText(self.tr("Annulla"))
         self.btnClose.setText(self.tr("Chiudi"))
@@ -336,16 +397,26 @@ class GeoPackageConverterDialog(QDialog):
         project = QgsProject.instance()
         if project is None:
             return
-        vectors = [l for l in project.mapLayers().values() if l.type() == QgsMapLayer.VectorLayer]
-        if not vectors:
-            placeholder = QListWidgetItem(self.tr("(nessun layer vettoriale nel progetto)"))
+        supported = [
+            l for l in project.mapLayers().values()
+            if l.type() in (QgsMapLayer.VectorLayer, QgsMapLayer.RasterLayer)
+        ]
+        if not supported:
+            placeholder = QListWidgetItem(self.tr("(nessun layer vettoriale o raster nel progetto)"))
             placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
             self.lstProjectLayers.addItem(placeholder)
             return
-        for layer in vectors:
-            geom = layer.geometryType() if hasattr(layer, "geometryType") else ""
+        for layer in supported:
             crs = layer.crs().authid() if layer.crs().isValid() else "?"
-            label = f"{layer.name()}  —  {crs}  ({layer.featureCount()} feat.)"
+            if layer.type() == QgsMapLayer.RasterLayer:
+                label = (
+                    f"{layer.name()}  —  {crs}  "
+                    f"({layer.width()}x{layer.height()}, "
+                    f"{layer.bandCount()} {'banda' if layer.bandCount() == 1 else 'bande'})  "
+                    f"[Raster]"
+                )
+            else:
+                label = f"{layer.name()}  —  {crs}  ({layer.featureCount()} feat.)"
             item = QListWidgetItem(label)
             item.setFlags(item.flags() | ITEM_IS_USER_CHECKABLE | ITEM_IS_ENABLED)
             item.setCheckState(CHECKED)
@@ -394,13 +465,12 @@ class GeoPackageConverterDialog(QDialog):
                 "Decide <i>quanti</i> file GeoPackage verranno generati e come saranno divise i layer:<br><br>"
                 "• <b>Tutto in un unico GeoPackage</b><br>"
                 "&nbsp;&nbsp;Un solo file <code>.gpkg</code> con tutti i layer dentro.<br>"
-                "• <b>Un GeoPackage per CRS</b><br>"
-                "&nbsp;&nbsp;I layer vengono divise per sistema di coordinate. "
-                "Utile se hai dati misti.<br>"
                 "• <b>Un GeoPackage per sottocartella</b><br>"
                 "&nbsp;&nbsp;<i>(solo modalità Da cartella)</i>. Replica la struttura della cartella di origine.<br>"
                 "• <b>Un GeoPackage per gruppo della legenda</b><br>"
-                "&nbsp;&nbsp;<i>(solo modalità Da progetto)</i>. Usa i gruppi del Pannello Layer come criterio."
+                "&nbsp;&nbsp;<i>(solo modalità Da progetto)</i>. Crea un <code>.gpkg</code> per ogni gruppo "
+                "del Pannello Layer. I layer <b>senza gruppo</b> ottengono ciascuno "
+                "il proprio file con il nome del layer."
             ),
             self.tr("Quanti GeoPackage generare e come dividere i layer"),
         )
@@ -429,9 +499,12 @@ class GeoPackageConverterDialog(QDialog):
                 "Memorizza lo stile QML di ogni layer dentro il GeoPackage stesso "
                 "(tabella <code>layer_styles</code>).<br><br>"
                 "Quando riaprirai il <code>.gpkg</code> in QGIS, lo stile sarà <i>già applicato</i> "
-                "senza dover importare manualmente un file <code>.qml</code>."
+                "senza dover importare manualmente un file <code>.qml</code>.<br><br>"
+                "<b>Nota:</b> si applica solo ai layer <i>vettoriali</i>. "
+                "I raster non supportano il salvataggio dello stile nel GeoPackage "
+                "(limitazione GDAL)."
             ),
-            self.tr("Salva lo stile di ogni layer dentro il GeoPackage"),
+            self.tr("Salva lo stile di ogni layer vettoriale dentro il GeoPackage"),
         )
 
         apply(
@@ -492,9 +565,10 @@ class GeoPackageConverterDialog(QDialog):
         )
         self.edtFolder.setToolTip(self.tr(
             "<b>Cartella di input</b><br>"
-            "La cartella che contiene i file vettoriali da convertire.<br><br>"
-            "Formati supportati: <code>.shp .tab .kml .kmz .gml .geojson "
+            "La cartella che contiene i file da convertire.<br><br>"
+            "<b>Vettoriali:</b> <code>.shp .tab .kml .kmz .gml .geojson "
             ".json .dxf .gpx .mif</code><br>"
+            "<b>Raster:</b> <code>.tif .tiff .jp2 .ecw .img .asc .vrt</code><br><br>"
             "Sono supportati anche file <code>.zip</code> contenenti shapefile "
             "(letti tramite <code>/vsizip/</code>, niente estrazione)."
         ))
@@ -518,8 +592,8 @@ class GeoPackageConverterDialog(QDialog):
             self.lstProjectLayers,
             self.tr(
                 "<b>Layer del progetto</b><br>"
-                "Spunta i layer vettoriali da convertire. Dopo il nome trovi CRS e "
-                "numero di feature; il <i>tooltip su ogni riga</i> mostra il percorso del file sorgente."
+                "Spunta i layer vettoriali e raster da convertire. Dopo il nome trovi CRS e "
+                "metadati; il <i>tooltip su ogni riga</i> mostra il percorso del file sorgente."
             ),
             self.tr("Spunta i layer del progetto da convertire"),
         )
@@ -562,6 +636,44 @@ class GeoPackageConverterDialog(QDialog):
             ),
             self.tr("Riapre il report HTML dell'ultima conversione"),
         )
+
+        # ----- Raster options -----
+        apply(
+            self.cmbTileFormat,
+            self.tr(
+                "<b>Formato tile raster</b><br>"
+                "Codifica delle tile all'interno del GeoPackage raster:<br><br>"
+                "• <b>AUTO</b> — GDAL sceglie automaticamente in base ai dati<br>"
+                "• <b>PNG</b> — Senza perdita, ideale per dati categorici o con trasparenza<br>"
+                "• <b>JPEG</b> — Compressione lossy, file più piccoli per ortofoto/satellitari<br>"
+                "• <b>WEBP</b> — Buon compromesso qualità/dimensione (richiede GDAL ≥ 2.4)"
+            ),
+            self.tr("Formato di compressione delle tile raster"),
+        )
+        self.lblTileFormat.setToolTip(self.cmbTileFormat.toolTip())
+
+        apply(
+            self.cmbTileSize,
+            self.tr(
+                "<b>Dimensione tile</b><br>"
+                "Lato in pixel di ogni tile quadrata:<br>"
+                "• <b>256</b> — standard, migliore compatibilità<br>"
+                "• <b>512</b> — meno tile ma più grandi, leggermente più veloce su dataset enormi"
+            ),
+            self.tr("Dimensione in pixel delle tile raster"),
+        )
+        self.lblTileSize.setToolTip(self.cmbTileSize.toolTip())
+
+        apply(
+            self.spnJpegQuality,
+            self.tr(
+                "<b>Qualità compressione</b><br>"
+                "Valore 1–100 per JPEG e WebP (ignorato per PNG).<br>"
+                "75 è un buon default; valori più alti = migliore qualità ma file più grandi."
+            ),
+            self.tr("Qualità di compressione JPEG/WebP (1–100)"),
+        )
+        self.lblJpegQuality.setToolTip(self.spnJpegQuality.toolTip())
 
         # ----- Group box title -----
         self.grpOptions.setToolTip(self.tr(
@@ -648,7 +760,7 @@ class GeoPackageConverterDialog(QDialog):
         self.tabWidget.currentChanged.connect(self._on_tab_changed)
         self.edtFolder.textChanged.connect(self._on_input_folder_changed)
         self.edtOutput.textChanged.connect(self._refresh_run_state)
-        self.lstProjectLayers.itemChanged.connect(lambda _: self._refresh_run_state())
+        self.lstProjectLayers.itemChanged.connect(self._on_project_layer_toggled)
         self.cmbGrouping.currentIndexChanged.connect(self._on_grouping_changed)
         self.chkMirrorStructure.toggled.connect(self._on_mirror_toggled)
 
@@ -677,6 +789,16 @@ class GeoPackageConverterDialog(QDialog):
             crs = QgsCoordinateReferenceSystem(crs_authid)
             if crs.isValid():
                 self.crsSelector.setCrs(crs)
+        # Raster options.
+        tile_fmt = s.value(SETTINGS_PREFIX + "tile_format", "AUTO", type=str)
+        idx = self.cmbTileFormat.findText(tile_fmt)
+        if idx >= 0:
+            self.cmbTileFormat.setCurrentIndex(idx)
+        tile_sz = s.value(SETTINGS_PREFIX + "tile_size", "256", type=str)
+        idx = self.cmbTileSize.findText(tile_sz)
+        if idx >= 0:
+            self.cmbTileSize.setCurrentIndex(idx)
+        self.spnJpegQuality.setValue(s.value(SETTINGS_PREFIX + "jpeg_quality", 75, type=int))
 
     def _save_settings(self) -> None:
         s = QSettings()
@@ -690,6 +812,9 @@ class GeoPackageConverterDialog(QDialog):
             SETTINGS_PREFIX + "crs_authid",
             crs.authid() if crs.isValid() else "",
         )
+        s.setValue(SETTINGS_PREFIX + "tile_format", self.cmbTileFormat.currentText())
+        s.setValue(SETTINGS_PREFIX + "tile_size", self.cmbTileSize.currentText())
+        s.setValue(SETTINGS_PREFIX + "jpeg_quality", self.spnJpegQuality.value())
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._save_settings()
@@ -711,6 +836,10 @@ class GeoPackageConverterDialog(QDialog):
     # ------------------------------------------------------------------
     # Dynamic UI (output label, run-button enabled state)
     # ------------------------------------------------------------------
+
+    def _on_project_layer_toggled(self, _item) -> None:
+        self._refresh_run_state()
+        self._update_raster_options_visibility()
 
     def _on_input_folder_changed(self, _text: str) -> None:
         if not self._restoring_settings:
@@ -751,6 +880,33 @@ class GeoPackageConverterDialog(QDialog):
         # in modalità cartella i sorgenti raramente hanno .qml sidecar,
         # e salvare lo stile di default di QGIS è inutile.
         self.chkSaveStyles.setVisible(on_project)
+        self._update_raster_options_visibility()
+
+    def _update_raster_options_visibility(self) -> None:
+        """Show raster option widgets only when raster items are present."""
+        has_raster = False
+        if self.tabWidget.currentWidget() is self.tabFromProject:
+            # Check if any checked layer is a raster.
+            project = QgsProject.instance()
+            for i in range(self.lstProjectLayers.count()):
+                wi = self.lstProjectLayers.item(i)
+                if wi.checkState() != CHECKED:
+                    continue
+                layer_id = wi.data(Qt.ItemDataRole.UserRole)
+                layer = project.mapLayer(layer_id) if (project and layer_id) else None
+                if layer is not None and layer.type() == QgsMapLayer.RasterLayer:
+                    has_raster = True
+                    break
+        else:
+            has_raster = any(
+                it.get("item_type") == "raster" for it in self._scan_results
+            )
+        for w in (
+            self.lblRasterOptions, self.lblTileFormat, self.cmbTileFormat,
+            self.lblTileSize, self.cmbTileSize,
+            self.lblJpegQuality, self.spnJpegQuality,
+        ):
+            w.setVisible(has_raster)
 
     def _maybe_suggest_output(self) -> None:
         """
@@ -850,6 +1006,7 @@ class GeoPackageConverterDialog(QDialog):
             if item.flags() & ITEM_IS_USER_CHECKABLE:
                 item.setCheckState(state)
         self._refresh_run_state()
+        self._update_raster_options_visibility()
 
     def _browse_input_folder(self) -> None:
         start = self.edtFolder.text() or ""
@@ -914,18 +1071,27 @@ class GeoPackageConverterDialog(QDialog):
         self._populate_preview_table(results)
         self._scan_task = None
         if not results:
-            self._log(self.tr("Nessun file vettoriale trovato."))
+            self._log(self.tr("Nessun file supportato trovato."))
             QMessageBox.warning(
                 self, self.tr("Cartella vuota"),
                 self.tr(
-                    "La cartella selezionata non contiene file vettoriali "
-                    "supportati (SHP, TAB, KML, GML, GeoJSON, DXF, GPX, MIF, ZIP)."
+                    "La cartella selezionata non contiene file supportati.\n\n"
+                    "Vettoriali: SHP, TAB, KML, GML, GeoJSON, DXF, GPX, MIF, ZIP\n"
+                    "Raster: GeoTIFF, JP2, ECW, IMG, ASC, VRT"
                 ),
             )
         else:
-            self._log(self.tr("Trovati {n} file supportati").format(n=len(results)))
+            n_vec = sum(1 for r in results if r.get("item_type", "vector") != "raster")
+            n_ras = sum(1 for r in results if r.get("item_type") == "raster")
+            parts = []
+            if n_vec:
+                parts.append(self.tr("{n} vettoriali").format(n=n_vec))
+            if n_ras:
+                parts.append(self.tr("{n} raster").format(n=n_ras))
+            self._log(self.tr("Trovati {detail}").format(detail=", ".join(parts) or str(len(results))))
         self._maybe_suggest_output()
         self._refresh_run_state()
+        self._update_raster_options_visibility()
 
     def _on_scan_failed(self) -> None:
         self._scan_task = None
@@ -944,13 +1110,26 @@ class GeoPackageConverterDialog(QDialog):
                 display_format = f"{display_format} (zip)"
                 if archive:
                     tooltip = f"{archive} → {inner}"
+            # Raster items show dimensions instead of feature count / encoding.
+            is_raster = it.get("item_type") == "raster"
+            if is_raster:
+                w = it.get("raster_width", 0)
+                h = it.get("raster_height", 0)
+                bands = it.get("band_count", 0)
+                dim_str = f"{w}×{h}, {bands} {'banda' if bands == 1 else 'bande'}" if w else ""
+                feat_cell = dim_str
+                enc_cell = "N/A"
+            else:
+                fc = it.get("feature_count", 0)
+                feat_cell = f"{fc} feat." if fc else ""
+                enc_cell = it.get("encoding", "")
             cells = [
                 display_name,
                 display_format,
                 it.get("geometry_type", ""),
                 it.get("crs", ""),
-                str(it.get("feature_count", "")),
-                it.get("encoding", ""),
+                feat_cell,
+                enc_cell,
                 "; ".join(it.get("warnings", []) or []),
             ]
             for col, text in enumerate(cells):
@@ -973,21 +1152,64 @@ class GeoPackageConverterDialog(QDialog):
         items = []
         project = QgsProject.instance()
         root = project.layerTreeRoot() if project else None
+        # Capture the original tree structure for later reloading.
+        self._original_tree_snapshot = self._snapshot_layer_tree(root) if root else []
         for i in range(self.lstProjectLayers.count()):
             wi = self.lstProjectLayers.item(i)
             if wi.checkState() != CHECKED:
                 continue
             layer_id = wi.data(Qt.ItemDataRole.UserRole)
             layer = project.mapLayer(layer_id) if (project and layer_id) else None
-            if not isinstance(layer, QgsVectorLayer):
+            if layer is None:
                 continue
             legend_group = ""
             if root is not None:
                 node = root.findLayer(layer.id())
                 if node is not None and node.parent() is not None and node.parent() != root:
                     legend_group = node.parent().name() or ""
-            items.append(self._build_project_item(layer, legend_group))
+            if layer.type() == QgsMapLayer.RasterLayer:
+                items.append(self._build_raster_project_item(layer, legend_group))
+            elif isinstance(layer, QgsVectorLayer):
+                items.append(self._build_project_item(layer, legend_group))
         return items
+
+    @staticmethod
+    def _snapshot_layer_tree(root) -> list:
+        """
+        Walk the QGIS layer tree and return a lightweight ordered list
+        describing every checked layer's position.
+
+        Each entry is a dict:
+          {"name": <layer display name>,
+           "group": <parent group name or "">,
+           "visible": bool}
+
+        Groups appear in the same top-to-bottom order as the legend.
+        This snapshot is used after conversion to reload the GPKG layers
+        in the same visual order the user had in the project.
+        """
+        from qgis.core import QgsLayerTree, QgsLayerTreeLayer, QgsLayerTreeGroup
+
+        snapshot: list = []
+        for child in root.children():
+            if isinstance(child, QgsLayerTreeGroup) and not isinstance(child, QgsLayerTreeLayer):
+                group_name = child.name()
+                for sub in child.children():
+                    if isinstance(sub, QgsLayerTreeLayer) and sub.layer():
+                        snapshot.append({
+                            "name": sub.layer().name(),
+                            "group": group_name,
+                            "visible": sub.isVisible(),
+                            "layer_id": sub.layerId(),
+                        })
+            elif isinstance(child, QgsLayerTreeLayer) and child.layer():
+                snapshot.append({
+                    "name": child.layer().name(),
+                    "group": "",
+                    "visible": child.isVisible(),
+                    "layer_id": child.layerId(),
+                })
+        return snapshot
 
     @staticmethod
     def _build_project_item(layer, legend_group: str) -> dict:
@@ -1024,6 +1246,7 @@ class GeoPackageConverterDialog(QDialog):
         item = {
             "path": Path(raw_source),
             "name": layer.name(),
+            "item_type": "vector",
             "crs": layer.crs().authid() if layer.crs().isValid() else "Unknown",
             "encoding": layer.dataProvider().encoding() if layer.dataProvider() else "UTF-8",
             "legend_group": legend_group,
@@ -1047,13 +1270,52 @@ class GeoPackageConverterDialog(QDialog):
             pass
         return item
 
+    @staticmethod
+    def _build_raster_project_item(layer, legend_group: str) -> dict:
+        """Build a converter-friendly item dict from a QgsRasterLayer.
+
+        Detects GDAL virtual sources (``/vsizip/``, ``/vsicurl/``, …)
+        so the raster converter doesn't trip on ``.exists()`` checks.
+        """
+        full_source = layer.source()
+        raw_source = full_source.split("|", 1)[0]
+
+        is_virtual = False
+        uri = None
+        normalised = raw_source.replace("\\", "/")
+        for prefix in ("/vsizip/", "/vsigzip/", "/vsitar/", "/vsicurl/", "/vsis3/"):
+            if normalised.startswith(prefix) or normalised.lstrip("/").startswith(prefix.lstrip("/")):
+                is_virtual = True
+                if not normalised.startswith("/"):
+                    normalised = "/" + normalised
+                uri = normalised
+                break
+
+        crs = layer.crs()
+        item: dict = {
+            "path": Path(raw_source),
+            "name": layer.name(),
+            "item_type": "raster",
+            "crs": crs.authid() if crs.isValid() else "Unknown",
+            "encoding": "N/A",
+            "legend_group": legend_group,
+            "geometry_type": "Raster",
+            "raster_width": layer.width(),
+            "raster_height": layer.height(),
+            "band_count": layer.bandCount(),
+        }
+        if is_virtual:
+            item["is_virtual"] = True
+            item["uri"] = uri
+        return item
+
     def _run(self) -> None:
         items = self._collect_items()
         if not items:
             on_folder = self.tabWidget.currentWidget() is self.tabFromFolder
             if on_folder:
                 msg = self.tr(
-                    "La cartella non contiene file vettoriali supportati."
+                    "La cartella non contiene file supportati (vettoriali o raster)."
                 )
             else:
                 msg = self.tr("Seleziona almeno un layer.")
@@ -1091,12 +1353,30 @@ class GeoPackageConverterDialog(QDialog):
             validate_geometries=self.chkValidate.isChecked(),
             dry_run=False,
         )
+        # Raster converter: always created so mixed bundles work.
+        raster_conv = RasterConverter(
+            target_crs=target_crs,
+            tile_format=self.cmbTileFormat.currentText(),
+            tile_size=int(self.cmbTileSize.currentText()),
+            jpeg_quality=self.spnJpegQuality.value(),
+            dry_run=False,
+        )
+        # Derive a project-based fallback name for ungrouped layers.
+        _proj = QgsProject.instance()
+        _proj_name = ""
+        if on_project and _proj:
+            _proj_name = (
+                Path(_proj.fileName()).stem if _proj.fileName()
+                else _proj.title() or ""
+            )
         self._task = _ConversionTask(
             items=items,
             output_path=out_path,
             grouping_index=self._current_grouping_constant(),
             converter=converter,
             mirror_layout=self.chkMirrorStructure.isChecked(),
+            raster_converter=raster_conv,
+            project_name=_proj_name,
         )
         self._task.progressChanged.connect(self._on_progress)
         self._task.taskCompleted.connect(self._on_task_completed)
@@ -1231,11 +1511,47 @@ class GeoPackageConverterDialog(QDialog):
             return
 
         added, failed = self._add_layers_to_project(per_file)
+        # Hide the original project layers so only the converted ones
+        # are visible — avoids visual duplication.
+        self._hide_original_layers()
         self._log(
             self.tr("Layer aggiunti al progetto: {added}, falliti: {failed}").format(
                 added=added, failed=failed
             )
         )
+
+    def _hide_original_layers(self) -> None:
+        """Turn off visibility of every original layer that was converted."""
+        snapshot = getattr(self, "_original_tree_snapshot", [])
+        if not snapshot:
+            return
+        project = QgsProject.instance()
+        root = project.layerTreeRoot() if project else None
+        if root is None:
+            return
+        converted_names = {e["name"] for e in snapshot}
+        for child in root.children():
+            # Skip the "GeoPackage Converter" group we just created.
+            if hasattr(child, "name") and child.name() == "GeoPackage Converter":
+                continue
+            self._set_subtree_visibility(child, converted_names)
+
+    @staticmethod
+    def _set_subtree_visibility(node, names_to_hide: set) -> None:
+        """Recursively hide layers whose name is in *names_to_hide*."""
+        from qgis.core import QgsLayerTreeLayer, QgsLayerTreeGroup
+
+        if isinstance(node, QgsLayerTreeLayer):
+            if node.layer() and node.layer().name() in names_to_hide:
+                node.setItemVisibilityChecked(False)
+        elif isinstance(node, QgsLayerTreeGroup):
+            for child in node.children():
+                GeoPackageConverterDialog._set_subtree_visibility(child, names_to_hide)
+            # If all children are now hidden, hide the group too.
+            if all(
+                not c.isVisible() for c in node.children()
+            ):
+                node.setItemVisibilityChecked(False)
 
     @staticmethod
     def _list_gpkg_layers(gpkg_path: Path) -> list:
@@ -1252,20 +1568,30 @@ class GeoPackageConverterDialog(QDialog):
         except sqlite3.DatabaseError:
             return []
 
+    @staticmethod
+    def _list_gpkg_raster_layers(gpkg_path: Path) -> list:
+        """Return the list of raster table names inside a GeoPackage."""
+        import sqlite3
+
+        try:
+            with sqlite3.connect(str(gpkg_path)) as con:
+                rows = con.execute(
+                    "SELECT table_name FROM gpkg_contents "
+                    "WHERE data_type IN ('tiles', '2d-gridded-coverage') "
+                    "ORDER BY table_name"
+                ).fetchall()
+            return [r[0] for r in rows]
+        except sqlite3.DatabaseError:
+            return []
+
     def _add_layers_to_project(self, per_file: list) -> tuple:
         """
         Load each sublayer of every GPKG and return (added, failed) counts.
 
-        Behaviour:
-          * 1 GPKG  -> layers are added flat (no group) to keep the
-            legend uncluttered.
-          * N GPKGs -> mirror the on-disk folder layout into nested
-            QGIS layer-tree groups. The common parent of all output
-            files is used as the root; deeper segments become subgroups.
-            When a GPKG file is named after its enclosing folder
-            (the convention used by the "Replica struttura" mode), the
-            redundant level is collapsed so we get one group per folder
-            and not "folder/folder/layer".
+        When a tree snapshot was captured (project mode), the converted
+        layers are added in the **exact same order** with the same group
+        structure and visibility as the original project.  Otherwise
+        falls back to the folder-based layout.
         """
         project = QgsProject.instance()
         if project is None:
@@ -1274,13 +1600,85 @@ class GeoPackageConverterDialog(QDialog):
         if root is None:
             return 0, 0
 
-        parent_group = root.insertGroup(0, "GeoPackage Converter")
+        # If we have a tree snapshot from project mode, use it.
+        snapshot = getattr(self, "_original_tree_snapshot", [])
+        if snapshot:
+            return self._add_layers_from_snapshot(per_file, root, project, snapshot)
 
-        # Single GPKG: flat add under the parent group.
+        # Folder mode: use the generic layout approach.
+        parent_group = root.insertGroup(0, "GeoPackage Converter")
         if len(per_file) <= 1:
             return self._add_layers_flat(per_file, parent_group)
+        return self._add_layers_by_folder(per_file, parent_group)
 
-        # Multiple GPKGs: mirror the folder layout in the layer tree.
+    def _add_layers_from_snapshot(self, per_file, root, project, snapshot) -> tuple:
+        """
+        Recreate the original project layer tree inside a
+        'GeoPackage Converter' parent group, preserving the exact
+        order, grouping and visibility from the snapshot.
+        """
+        # Build a lookup: layer_name -> (gpkg_path, is_raster).
+        layer_lookup: dict = {}
+        raster_cache: dict = {}
+        for gpkg_path, layer_names in per_file:
+            if gpkg_path not in raster_cache:
+                raster_cache[gpkg_path] = set(self._list_gpkg_raster_layers(gpkg_path))
+            raster_set = raster_cache[gpkg_path]
+            for name in layer_names:
+                layer_lookup[name] = (gpkg_path, name in raster_set)
+
+        parent_group = root.insertGroup(0, "GeoPackage Converter")
+        group_cache: dict = {}
+        added = 0
+        failed = 0
+
+        for entry in snapshot:
+            layer_name = entry["name"]
+            group_name = entry["group"]
+            visible = entry["visible"]
+
+            if layer_name not in layer_lookup:
+                continue  # layer was not selected for conversion
+
+            gpkg_path, is_raster = layer_lookup[layer_name]
+            layer = self._load_gpkg_layer(gpkg_path, layer_name, is_raster)
+            if layer is None or not layer.isValid():
+                failed += 1
+                continue
+            try:
+                layer.loadDefaultStyle()
+            except Exception:  # noqa: BLE001
+                pass
+            # Raster styles cannot be saved inside GeoPackage (GDAL
+            # limitation).  Copy the full style (renderer, opacity,
+            # resampling, brightness/contrast …) from the original
+            # project layer so the visual appearance is preserved.
+            if is_raster:
+                orig_id = entry.get("layer_id", "")
+                orig = project.mapLayer(orig_id) if orig_id else None
+                if orig:
+                    from qgis.PyQt.QtXml import QDomDocument
+                    doc = QDomDocument("qgis")
+                    if not orig.exportNamedStyle(doc):
+                        layer.importNamedStyle(doc)
+            project.addMapLayer(layer, addToLegend=False)
+
+            if group_name:
+                if group_name not in group_cache:
+                    group_cache[group_name] = parent_group.addGroup(group_name)
+                target = group_cache[group_name]
+            else:
+                target = parent_group
+
+            node = target.addLayer(layer)
+            node.setItemVisibilityChecked(visible)
+            added += 1
+
+        return added, failed
+
+    def _add_layers_by_folder(self, per_file, parent_group) -> tuple:
+        """Multiple GPKGs from folder mode: mirror the folder layout."""
+        project = QgsProject.instance()
         paths = [p for p, _ in per_file]
         try:
             common = Path(os.path.commonpath([str(p.parent) for p in paths]))
@@ -1291,6 +1689,7 @@ class GeoPackageConverterDialog(QDialog):
         failed = 0
         group_cache: dict = {}
 
+        raster_tables = {}
         for gpkg_path, layer_names in per_file:
             if not layer_names:
                 continue
@@ -1308,10 +1707,12 @@ class GeoPackageConverterDialog(QDialog):
                 chain = parents + [gpkg_path.stem]
 
             target = self._ensure_group_chain(parent_group, chain, group_cache)
+            if gpkg_path not in raster_tables:
+                raster_tables[gpkg_path] = set(self._list_gpkg_raster_layers(gpkg_path))
+            raster_set = raster_tables[gpkg_path]
             for layer_name in layer_names:
-                uri = f"{gpkg_path}|layername={layer_name}"
-                layer = QgsVectorLayer(uri, layer_name, "ogr")
-                if not layer.isValid():
+                layer = self._load_gpkg_layer(gpkg_path, layer_name, layer_name in raster_set)
+                if layer is None or not layer.isValid():
                     failed += 1
                     continue
                 try:
@@ -1324,15 +1725,15 @@ class GeoPackageConverterDialog(QDialog):
         return added, failed
 
     def _add_layers_flat(self, per_file: list, parent_group) -> tuple:
-        """Add every sublayer under the parent group."""
+        """Add every sublayer under the parent group (single GPKG)."""
         project = QgsProject.instance()
         added = 0
         failed = 0
         for gpkg_path, layer_names in per_file:
+            raster_set = set(self._list_gpkg_raster_layers(gpkg_path))
             for layer_name in layer_names:
-                uri = f"{gpkg_path}|layername={layer_name}"
-                layer = QgsVectorLayer(uri, layer_name, "ogr")
-                if not layer.isValid():
+                layer = self._load_gpkg_layer(gpkg_path, layer_name, layer_name in raster_set)
+                if layer is None or not layer.isValid():
                     failed += 1
                     continue
                 try:
@@ -1343,6 +1744,16 @@ class GeoPackageConverterDialog(QDialog):
                 parent_group.addLayer(layer)
                 added += 1
         return added, failed
+
+    @staticmethod
+    def _load_gpkg_layer(gpkg_path: Path, layer_name: str, is_raster: bool):
+        """Load a single layer from a GPKG, choosing the correct QGIS class."""
+        if is_raster:
+            # GDAL raster subdataset URI for GeoPackage.
+            uri = f"GPKG:{gpkg_path}:{layer_name}"
+            return QgsRasterLayer(uri, layer_name, "gdal")
+        uri = f"{gpkg_path}|layername={layer_name}"
+        return QgsVectorLayer(uri, layer_name, "ogr")
 
     @staticmethod
     def _ensure_group_chain(root, chain: list, cache: dict):

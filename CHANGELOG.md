@@ -26,6 +26,53 @@ Funzionalità valutate ma non implementate, da rivalutare in base al feedback d'
 - **Header copyright nei file `.py`.**
   Aggiungere boilerplate GPL-3.0 in cima a ogni sorgente Python.
 
+## [0.2.0] — 2026-05-21
+
+Supporto raster completo e miglioramenti alla modalità progetto.
+
+### Aggiunto
+
+- **Conversione raster** — i layer raster (GeoTIFF, ASC, IMG, ECW, …)
+  vengono convertiti in tile raster GeoPackage. Nuovo modulo
+  `core/raster_converter.py` con classe `RasterConverter`.
+- **Opzioni raster nella GUI** — formato tile (AUTO/PNG/JPEG/WEBP),
+  dimensione tile (64–1024), qualità compressione (1–100).
+- **Scansione raster nella modalità "Da cartella"** — `folder_scanner`
+  rileva ora anche `.tif`, `.tiff`, `.asc`, `.img`, `.ecw`, `.jp2`, `.dt0`,
+  `.dt1`, `.dt2`.
+- **Preservazione dell'albero dei layer** — in modalità "Da progetto" i
+  layer convertiti vengono ricaricati con lo **stesso ordine, gli stessi
+  gruppi e la stessa visibilità** del progetto originale.
+- **Clonazione completa degli stili raster** — poiché GeoPackage non può
+  salvare stili raster (limitazione GDAL), il plugin copia automaticamente
+  renderer, opacità, resampling, luminosità/contrasto dal layer originale
+  tramite `exportNamedStyle`/`importNamedStyle`.
+- **Nascondimento dei layer originali** — dopo il caricamento dei layer
+  convertiti, gli originali vengono nascosti per evitare duplicazione
+  visiva.
+- **GPKG individuale per layer senza gruppo** — nella strategia "per gruppo
+  della legenda", i layer non raggruppati ottengono ciascuno il proprio
+  file `.gpkg` con il nome del layer (prima finivano tutti in un unico
+  `ungrouped.gpkg`).
+- **Breakdown vettoriali/raster nel report** — la card "Conversioni
+  riuscite" mostra il dettaglio "N vettoriali + M raster" quando presenti
+  entrambi i tipi.
+- **Algoritmi di Processing aggiornati** — sia "Da cartella" che "Da
+  progetto" supportano ora la conversione raster con parametri dedicati.
+
+### Corretto
+
+- Tooltip della strategia di raggruppamento: rimossa l'opzione inesistente
+  "Per CRS" e aggiornata la descrizione "Per gruppo della legenda".
+- `RasterConversionError` aggiunta a `core/exceptions.py`.
+
+### Note tecniche
+
+- Nuovo file: `core/raster_converter.py`.
+- `gui/main_dialog.py` esteso con snapshot dell'albero layer, caricamento
+  da snapshot, nascondimento originali, clonazione stili raster.
+- `gui/main_dialog_base.ui` aggiornato con pannello opzioni raster.
+
 ## [0.1.0] — 2026-05-03
 
 Prima versione sperimentale. Funzionalmente completa.

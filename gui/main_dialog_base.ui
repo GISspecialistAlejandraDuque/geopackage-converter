@@ -19,7 +19,7 @@
       <layout class="QVBoxLayout">
        <item>
         <widget class="QLabel" name="lblProjectHelp">
-         <property name="text"><string>Seleziona i layer vettoriali del progetto da convertire in GeoPackage.</string></property>
+         <property name="text"><string>Seleziona i layer vettoriali e raster del progetto da convertire in GeoPackage.</string></property>
          <property name="wordWrap"><bool>true</bool></property>
         </widget>
        </item>
@@ -61,9 +61,9 @@
          <property name="columnCount"><number>7</number></property>
          <column><property name="text"><string>Nome</string></property></column>
          <column><property name="text"><string>Formato</string></property></column>
-         <column><property name="text"><string>Geometria</string></property></column>
+         <column><property name="text"><string>Tipo</string></property></column>
          <column><property name="text"><string>CRS</string></property></column>
-         <column><property name="text"><string>N° feature</string></property></column>
+         <column><property name="text"><string>Dettagli</string></property></column>
          <column><property name="text"><string>Encoding</string></property></column>
          <column><property name="text"><string>Avvisi</string></property></column>
         </widget>
@@ -98,6 +98,37 @@
         <item><widget class="QCheckBox" name="chkSaveStyles"><property name="text"><string>Salva stili</string></property><property name="checked"><bool>true</bool></property></widget></item>
         <item><widget class="QCheckBox" name="chkValidate"><property name="text"><string>Valida geometrie</string></property></widget></item>
         <item><widget class="QCheckBox" name="chkDryRun"><property name="text"><string>Dry-run (anteprima)</string></property></widget></item>
+        <item><spacer><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property></spacer></item>
+       </layout>
+      </item>
+
+      <item row="4" column="0"><widget class="QLabel" name="lblRasterOptions"><property name="text"><string>Opzioni raster:</string></property></widget></item>
+      <item row="4" column="1">
+       <layout class="QHBoxLayout">
+        <item><widget class="QLabel" name="lblTileFormat"><property name="text"><string>Formato tile:</string></property></widget></item>
+        <item>
+         <widget class="QComboBox" name="cmbTileFormat">
+          <item><property name="text"><string>AUTO</string></property></item>
+          <item><property name="text"><string>PNG</string></property></item>
+          <item><property name="text"><string>JPEG</string></property></item>
+          <item><property name="text"><string>WEBP</string></property></item>
+         </widget>
+        </item>
+        <item><widget class="QLabel" name="lblTileSize"><property name="text"><string>Tile:</string></property></widget></item>
+        <item>
+         <widget class="QComboBox" name="cmbTileSize">
+          <item><property name="text"><string>256</string></property></item>
+          <item><property name="text"><string>512</string></property></item>
+         </widget>
+        </item>
+        <item><widget class="QLabel" name="lblJpegQuality"><property name="text"><string>Qualità:</string></property></widget></item>
+        <item>
+         <widget class="QSpinBox" name="spnJpegQuality">
+          <property name="minimum"><number>1</number></property>
+          <property name="maximum"><number>100</number></property>
+          <property name="value"><number>75</number></property>
+         </widget>
+        </item>
         <item><spacer><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property></spacer></item>
        </layout>
       </item>
