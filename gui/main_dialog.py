@@ -1146,6 +1146,9 @@ class GeoPackageConverterDialog(QDialog):
     def _collect_items(self) -> List[dict]:
         if self.tabWidget.currentWidget() is self.tabFromProject:
             return self._items_from_project()
+        # Folder mode: clear any project-mode snapshot so
+        # _add_layers_to_project uses the folder layout instead.
+        self._original_tree_snapshot = []
         return list(self._scan_results)
 
     def _items_from_project(self) -> List[dict]:
