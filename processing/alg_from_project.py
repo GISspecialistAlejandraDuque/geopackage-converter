@@ -16,6 +16,7 @@ from qgis.core import (
     QgsProcessingParameterBoolean,
     QgsProcessingParameterCrs,
     QgsProcessingParameterEnum,
+    QgsProcessingParameterExtent,
     QgsProcessingParameterFileDestination,
     QgsProcessingParameterMultipleLayers,
     QgsProcessingParameterNumber,
@@ -24,6 +25,14 @@ from qgis.core import (
 
 from ..core._paths import long_path
 from ..core.converter import Converter
+from ..core.provider_policy import (
+    ROUTE_LIVE_VECTOR,
+    ROUTE_REMOTE_RASTER,
+    VSI_PREFIXES,
+    is_remote_provider,
+    route_for_provider,
+    source_label,
+)
 from ..core.raster_converter import RasterConverter, TILE_FORMATS
 from ._common import (
     GROUPING_OPTIONS,
@@ -31,7 +40,7 @@ from ._common import (
     make_feedback_progress,
 )
 
-_VSI_PREFIXES = ("/vsizip/", "/vsigzip/", "/vsitar/", "/vsicurl/", "/vsis3/")
+_VSI_PREFIXES = VSI_PREFIXES
 
 
 def _layer_to_item(layer) -> dict:
@@ -70,6 +79,19 @@ def _layer_to_item(layer) -> dict:
         item["is_virtual"] = True
         item["uri"] = normalised
 
+    # Non-file providers (WFS, ArcGIS REST, memory, CSV, PostGIS…): hand
+    # the writer a main-thread clone of the live layer, since "ogr"
+    # cannot re-open their URI. Mirrors the dialog's _build_project_item.
+    provider = layer.providerType()
+    if route_for_provider(provider, is_raster=False) == ROUTE_LIVE_VECTOR:
+        item["layer_ref"] = layer.clone()
+        item["provider"] = provider
+        item["source_label"] = source_label(provider, layer.name(), layer.source())
+        if is_remote_provider(provider):
+            item["is_remote"] = True
+        item.pop("uri", None)
+        item["path"] = None
+
     # Snapshot the live style XML for the converter.
     try:
         from qgis.PyQt.QtXml import QDomDocument
@@ -84,11 +106,14 @@ def _layer_to_item(layer) -> dict:
     return item
 
 
-def _raster_layer_to_item(layer) -> dict:
+def _raster_layer_to_item(layer, extent=None, pixel_size=0.0) -> dict:
     """Map a QgsRasterLayer to a converter-friendly item dict.
 
     Handles GDAL virtual filesystem URIs (/vsizip/, /vsicurl/, etc.)
-    the same way the vector ``_layer_to_item`` does.
+    the same way the vector ``_layer_to_item`` does. Remote rasters
+    (WCS, ArcGIS MapServer, WMS) instead carry a live layer clone plus
+    the snapshot extent (``extent`` in the layer CRS, or the full layer
+    extent) and resolution (``pixel_size`` in CRS units, 0 = native/auto).
     """
     legend_group = ""
     project = QgsProject.instance()
@@ -116,10 +141,37 @@ def _raster_layer_to_item(layer) -> dict:
         "encoding": "N/A",
         "legend_group": legend_group,
         "geometry_type": "Raster",
+        "band_count": layer.bandCount(),
     }
     if is_virtual:
         item["is_virtual"] = True
         item["uri"] = normalised
+
+    provider = layer.providerType()
+    if route_for_provider(provider, is_raster=True) == ROUTE_REMOTE_RASTER:
+        from ..core.raster_converter import default_remote_resolution
+
+        ext = extent if (extent is not None and not extent.isEmpty()) else layer.extent()
+        extent_tuple = (ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum())
+        if pixel_size and pixel_size > 0:
+            xres = yres = float(pixel_size)
+        else:
+            prov = layer.dataProvider()
+            xres, yres = default_remote_resolution(
+                ext.width(),
+                ext.height(),
+                prov.xSize() if prov else 0,
+                prov.ySize() if prov else 0,
+            )
+        item["layer_ref"] = layer.clone()
+        item["provider"] = provider
+        item["source_label"] = source_label(provider, layer.name(), layer.source())
+        item["is_remote"] = True
+        item["raster_extent"] = extent_tuple
+        item["raster_xres"] = xres
+        item["raster_yres"] = yres
+        item.pop("uri", None)
+        item["path"] = None
     return item
 
 
@@ -153,6 +205,8 @@ class ConvertProjectLayersToGeoPackageAlgorithm(QgsProcessingAlgorithm):
     TILE_FORMAT = "TILE_FORMAT"
     TILE_SIZE = "TILE_SIZE"
     JPEG_QUALITY = "JPEG_QUALITY"
+    REMOTE_EXTENT = "REMOTE_EXTENT"
+    REMOTE_PIXEL_SIZE = "REMOTE_PIXEL_SIZE"
 
     def name(self) -> str:
         return "convert_project_layers_to_geopackage"
@@ -173,7 +227,12 @@ class ConvertProjectLayersToGeoPackageAlgorithm(QgsProcessingAlgorithm):
         return (
             "Esporta in GeoPackage i layer vettoriali e raster selezionati dal "
             "progetto QGIS attivo. Supporta riproiezione, raggruppamento "
-            "per CRS o per gruppo della legenda, e salvataggio degli stili."
+            "per CRS o per gruppo della legenda, e salvataggio degli stili. "
+            "I layer vettoriali remoti o non-file (WFS/OGC API Features, "
+            "ArcGIS REST FeatureServer, memoria, testo delimitato, PostGIS, "
+            "SpatiaLite) vengono scaricati e salvati nel GeoPackage; i raster "
+            "remoti (WCS, ArcGIS MapServer, WMS) vengono campionati "
+            "all'estensione e risoluzione indicate dai parametri dedicati."
         )
 
     def initAlgorithm(self, config=None):  # noqa: N802
@@ -242,6 +301,23 @@ class ConvertProjectLayersToGeoPackageAlgorithm(QgsProcessingAlgorithm):
             )
         )
         self.addParameter(
+            QgsProcessingParameterExtent(
+                self.REMOTE_EXTENT,
+                "Estensione per i raster remoti (vuoto = estensione intera del layer)",
+                optional=True,
+            )
+        )
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.REMOTE_PIXEL_SIZE,
+                "Risoluzione raster remoti (unità CRS, 0 = nativa/auto)",
+                type=QgsProcessingParameterNumber.Double,
+                defaultValue=0.0,
+                minValue=0.0,
+                optional=True,
+            )
+        )
+        self.addParameter(
             QgsProcessingParameterFileDestination(
                 self.OUTPUT,
                 "GeoPackage di output (o cartella per strategie multi-file)",
@@ -263,6 +339,7 @@ class ConvertProjectLayersToGeoPackageAlgorithm(QgsProcessingAlgorithm):
         tile_sz_idx = self.parameterAsEnum(parameters, self.TILE_SIZE, context)
         tile_size = 512 if tile_sz_idx == 1 else 256
         jpeg_quality = self.parameterAsInt(parameters, self.JPEG_QUALITY, context)
+        remote_pixel_size = self.parameterAsDouble(parameters, self.REMOTE_PIXEL_SIZE, context)
 
         if not layers:
             feedback.pushWarning("Nessun layer selezionato")
@@ -272,7 +349,18 @@ class ConvertProjectLayersToGeoPackageAlgorithm(QgsProcessingAlgorithm):
         items = []
         for layer in layers:
             if layer.type() == QgsMapLayer.RasterLayer:
-                items.append(_raster_layer_to_item(layer))
+                # The REMOTE_EXTENT is resolved per layer in the layer's CRS
+                # so the Processing framework handles the transform for us.
+                remote_extent = None
+                if self.REMOTE_EXTENT in parameters and parameters[self.REMOTE_EXTENT]:
+                    remote_extent = self.parameterAsExtent(
+                        parameters, self.REMOTE_EXTENT, context, layer.crs()
+                    )
+                items.append(
+                    _raster_layer_to_item(
+                        layer, extent=remote_extent, pixel_size=remote_pixel_size
+                    )
+                )
             else:
                 items.append(_layer_to_item(layer))
         feedback.pushInfo(f"Preparing {len(items)} layer(s)…")

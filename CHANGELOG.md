@@ -26,6 +26,86 @@ Funzionalità valutate ma non implementate, da rivalutare in base al feedback d'
 - **Header copyright nei file `.py`.**
   Aggiungere boilerplate GPL-3.0 in cima a ogni sorgente Python.
 
+- **Raster dentro gli archivi (ZIP e RAR).**
+  Oggi dagli archivi vengono estratti solo i file vettoriali (come per lo
+  ZIP fin dall'inizio). Estendere l'espansione anche ai raster interni, per
+  entrambi i formati contemporaneamente, non in modo asimmetrico.
+
+## [0.3.0] — 2026-08-20
+
+Conversione di sorgenti remote e non-file dalla modalità progetto, e
+supporto agli archivi `.rar` in modalità cartella.
+
+### Aggiunto
+
+- **Layer remoti e non-file in modalità "Da progetto"** — i layer
+  vettoriali che non provengono da un file (WFS/OGC API Features, ArcGIS
+  REST FeatureServer, memoria, testo delimitato/CSV, PostGIS, SpatiaLite…)
+  vengono ora convertiti in GeoPackage passando al writer un **clone del
+  layer vivo** invece di riaprirne la sorgente con il provider `ogr` (che
+  non ne conosce l'URI). Prima venivano scartati con l'errore fuorviante
+  "Source file does not exist".
+- **Raster remoti (WCS, ArcGIS MapServer, WMS)** — vengono campionati in
+  un GeoTIFF temporaneo tramite il *raster pipe* di QGIS e poi convertiti
+  in tile GeoPackage riusando le opzioni di tiling esistenti. Estensione
+  e risoluzione sono **modificabili** in una nuova riga di opzioni
+  (estensione intera del layer o della mappa corrente; risoluzione nativa
+  o personalizzata), con **stima della dimensione** dell'output e avviso
+  quando è molto grande.
+- **Archivi `.rar` in modalità "Da cartella"** — letti senza estrazione
+  tramite GDAL `/vsirar/` (richiede GDAL ≥ 3.7 con libarchive, es. QGIS
+  3.44+). Verifica automatica della capacità: se il GDAL installato non
+  supporta i RAR, l'archivio produce un avviso chiaro e la conversione
+  degli altri file prosegue.
+- **Riconoscimento `/vsirar/` e `/vsi7z/`** anche in modalità progetto per
+  i layer già caricati da un archivio.
+- **Fallback all'inglese** quando la lingua di QGIS non ha una traduzione
+  del plugin (prima ricadeva sull'italiano di origine). Vale sia per
+  l'interfaccia sia per il report HTML.
+- **Nuovi parametri di Processing** nell'algoritmo "Da progetto":
+  estensione e risoluzione per i raster remoti.
+- **Marcatori di provider** nell'elenco dei layer di progetto (`[WFS]`,
+  `[ArcGIS FS]`, `[PostGIS]`…) ed etichette di provider negli errori/report
+  al posto di percorsi finti.
+
+### Note tecniche
+
+- Nuovo modulo `core/provider_policy.py` (routing per provider, unica
+  fonte per i prefissi VSI e le etichette).
+- `core/converter.py`: `_write_layer` accetta un `QgsVectorLayer` già
+  valido; gli item con `layer_ref` saltano il controllo di esistenza su
+  disco. Il clone è creato sul thread principale e rilasciato dopo ogni
+  item.
+- `core/raster_converter.py`: nuovo `_write_remote_raster` + helper puri
+  `default_remote_resolution`/`estimate_remote_pixels`/`is_output_huge`.
+- `core/folder_scanner.py`: `rar_supported()`, `_list_rar_members()`,
+  `_iter_rar_vector_entries()`; corpo di espansione archivio condiviso tra
+  ZIP (stdlib `zipfile`, invariato) e RAR (`gdal.ReadDirRecursive`).
+- Sviluppato con assistenza IA. Licenza GPL-3.0-or-later.
+- **i18n**: le nuove stringhe dell'interfaccia sono avvolte in `tr()` ma la
+  traduzione EN/ES e la ricompilazione dei `.qm` restano da fare
+  manualmente (`i18n/build_translations.bat` con pylupdate6 + Qt Linguist).
+  Fino ad allora le stringhe nuove ricadono sull'italiano di origine.
+- **Packaging**: nuovo `scripts/build_release_zip.py` (esclude `CLAUDE.md`,
+  `tests/`, `.bat`, sorgenti `.ts` e file di marketing; percorsi con `/`).
+
+## [0.2.2] — 2026-05-27
+
+### Corretto
+
+- In modalità "Da cartella" lo snapshot dell'albero dei layer del
+  progetto non viene più riutilizzato per il caricamento dei GeoPackage
+  generati: `_collect_items` azzera `_original_tree_snapshot`, così i
+  layer convertiti vengono caricati con la struttura della cartella e non
+  con quella (errata) del progetto.
+
+## [0.2.1] — 2026-05-22
+
+### Modificato
+
+- Solo bump di versione / ri-pacchettizzazione. Nessuna modifica
+  funzionale rispetto alla 0.2.0.
+
 ## [0.2.0] — 2026-05-21
 
 Supporto raster completo e miglioramenti alla modalità progetto.

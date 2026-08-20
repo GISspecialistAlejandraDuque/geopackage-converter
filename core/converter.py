@@ -167,35 +167,50 @@ class Converter:
                 return result
 
         total = len(items)
+        remote_converted = 0
         for index, item in enumerate(items, start=1):
             name = str(item.get("name") or "layer")
             source = item.get("path")
+            live_layer = item.get("layer_ref")
+            # Errors are labeled with `source_label` (provider-aware, set
+            # for live/remote items) when present, else the source path.
+            label = str(item.get("source_label") or source or name)
             self._emit_progress(progress_callback, int(100 * (index - 1) / total), f"Converting {name}")
 
-            if not source:
+            if not source and live_layer is None:
                 result.add_error(name, "Item missing 'path'")
                 continue
             # Items the scanner already marked as unreadable (e.g. OneDrive
             # online-only placeholders): forward the warning verbatim and skip.
             if item.get("is_unreadable"):
                 msg = (item.get("warnings") or ["File non leggibile"])[0]
-                result.add_error(str(source), msg)
+                result.add_error(label, msg)
                 continue
-            source_path = Path(source)
-            # Virtual sources (zip via /vsizip/, etc.) bypass the on-disk
-            # existence check — OGR will resolve them.
-            is_virtual = bool(item.get("is_virtual")) or str(source_path).startswith("/vsizip/")
-            if not is_virtual and not source_path.exists():
-                result.add_error(str(source_path), "Source file does not exist")
-                continue
+            if live_layer is None:
+                source_path = Path(source)
+                # Virtual sources (zip/rar via /vsizip/, /vsirar/, etc.)
+                # bypass the on-disk existence check — OGR resolves them.
+                is_virtual = bool(item.get("is_virtual")) or str(source_path).startswith(
+                    ("/vsizip/", "/vsirar/")
+                )
+                if not is_virtual and not source_path.exists():
+                    result.add_error(label, "Source file does not exist")
+                    continue
 
             try:
                 self._process_item(item, output_path, result)
+                if item.get("is_remote"):
+                    remote_converted += 1
             except ConversionError as exc:
-                result.add_error(str(source_path), str(exc))
+                result.add_error(label, str(exc))
             except Exception as exc:  # noqa: BLE001 - batch must not abort on one item
-                result.add_error(str(source_path), f"Unexpected: {exc}")
+                result.add_error(label, f"Unexpected: {exc}")
 
+        if remote_converted:
+            result.add_warning(
+                f"{remote_converted} remote layer(s) downloaded and converted "
+                "(WFS/ArcGIS/WCS...)"
+            )
         self._emit_progress(progress_callback, 100, "Done")
         result.duration_seconds = time.monotonic() - start
         return result
@@ -211,25 +226,32 @@ class Converter:
         result: ConversionResult,
     ) -> None:
         name = str(item["name"])
-        # Prefer the explicit OGR URI when present (zip entries), else the path.
-        source_str = str(item.get("uri") or item["path"])
+        # Prefer the explicit OGR URI when present (zip entries), else the
+        # path; live items (layer_ref) may have neither — label with name.
+        source_str = str(item.get("uri") or item.get("path") or item.get("source_label") or name)
         encoding = str(item.get("encoding") or "UTF-8")
 
-        if self.dry_run:
-            result.add_success(output_path, layer_name=name)
-            result.add_warning(f"[dry-run] Would write '{name}' to {output_path.name}")
-            return
+        try:
+            if self.dry_run:
+                result.add_success(output_path, layer_name=name)
+                result.add_warning(f"[dry-run] Would write '{name}' to {output_path.name}")
+                return
 
-        error_msg = self._write_layer(
-            source_path=source_str,
-            layer_name=name,
-            output_path=output_path,
-            encoding=encoding,
-            style_xml=item.get("style_xml"),
-        )
-        if error_msg:
-            raise ConversionError(error_msg)
-        result.add_success(output_path, layer_name=name)
+            error_msg = self._write_layer(
+                source_path=source_str,
+                layer_name=name,
+                output_path=output_path,
+                encoding=encoding,
+                style_xml=item.get("style_xml"),
+                layer=item.get("layer_ref"),
+            )
+            if error_msg:
+                raise ConversionError(error_msg)
+            result.add_success(output_path, layer_name=name)
+        finally:
+            # Release the live layer clone as soon as the item is done:
+            # WFS/memory clones can hold a lot of cached features.
+            item.pop("layer_ref", None)
 
     # ------------------------------------------------------------------
     # QGIS-dependent write step (lazy import; tests monkeypatch)
@@ -242,10 +264,16 @@ class Converter:
         output_path: Path,
         encoding: str,
         style_xml: Optional[str] = None,
+        layer=None,
     ) -> Optional[str]:
         """
         Write one layer into the GPKG. Returns None on success or an
         error message on failure. Never raises.
+
+        ``layer`` — an already-valid QgsVectorLayer (a main-thread clone
+        of a project layer). When given, the source is NOT re-opened by
+        path: this is how WFS/ArcGIS REST/memory/CSV/PostGIS layers are
+        written, since "ogr" cannot open their URIs.
         """
         try:
             from qgis.core import (
@@ -257,7 +285,8 @@ class Converter:
         except ImportError as exc:  # pragma: no cover - production always has QGIS
             return f"QGIS core unavailable: {exc}"
 
-        layer = QgsVectorLayer(str(source_path), layer_name, "ogr")
+        if layer is None:
+            layer = QgsVectorLayer(str(source_path), layer_name, "ogr")
         if not layer.isValid():
             return f"Invalid source layer: {source_path}"
 

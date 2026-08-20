@@ -132,6 +132,31 @@
         <item><spacer><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property></spacer></item>
        </layout>
       </item>
+
+      <item row="5" column="0"><widget class="QLabel" name="lblRemoteRaster"><property name="text"><string>Raster remoti:</string></property></widget></item>
+      <item row="5" column="1">
+       <layout class="QHBoxLayout">
+        <item><widget class="QLabel" name="lblRemoteExtent"><property name="text"><string>Estensione:</string></property></widget></item>
+        <item>
+         <widget class="QComboBox" name="cmbRemoteExtent">
+          <item><property name="text"><string>Estensione intera del layer</string></property></item>
+          <item><property name="text"><string>Estensione mappa corrente</string></property></item>
+         </widget>
+        </item>
+        <item><widget class="QLabel" name="lblRemoteRes"><property name="text"><string>Risoluzione:</string></property></widget></item>
+        <item>
+         <widget class="QDoubleSpinBox" name="spnRemoteResolution">
+          <property name="decimals"><number>6</number></property>
+          <property name="minimum"><double>0.000000</double></property>
+          <property name="maximum"><double>1000000.000000</double></property>
+          <property name="value"><double>0.000000</double></property>
+          <property name="specialValueText"><string>(nativa/auto)</string></property>
+         </widget>
+        </item>
+        <item><widget class="QLabel" name="lblRemoteEstimate"><property name="text"><string/></property></widget></item>
+        <item><spacer><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property></spacer></item>
+       </layout>
+      </item>
      </layout>
     </widget>
    </item>

@@ -46,13 +46,16 @@ SUPPORTED_RASTER_EXTENSIONS: Dict[str, str] = {
     ".vrt": "vrt",
 }
 
-# Archives expanded virtually via GDAL's /vsizip/ filesystem.
+# Archives expanded virtually via GDAL's /vsizip/ and /vsirar/ filesystems.
 # Each entry inside becomes a separate item.
-_ARCHIVE_EXTENSIONS = {".zip"}
+_ARCHIVE_EXTENSIONS = {".zip", ".rar"}
 
-# Inner extensions worth surfacing from a ZIP. Mirrors SUPPORTED_EXTENSIONS
-# but excludes .kmz (already a zipped KML — handled by OGR directly).
-_ZIP_INNER_EXTENSIONS = set(SUPPORTED_EXTENSIONS) - {".kmz"}
+# Inner extensions worth surfacing from an archive. Mirrors
+# SUPPORTED_EXTENSIONS but excludes .kmz (already a zipped KML — handled
+# by OGR directly).
+_ARCHIVE_INNER_EXTENSIONS = set(SUPPORTED_EXTENSIONS) - {".kmz"}
+# Backward-compatible alias (older tests / callers).
+_ZIP_INNER_EXTENSIONS = _ARCHIVE_INNER_EXTENSIONS
 
 # Extensions for which encoding detection makes sense.
 # XML-/JSON-based formats are virtually always UTF-8.
@@ -120,35 +123,168 @@ def _iter_zip_vector_entries(zip_path: Path) -> Iterable[Dict[str, object]]:
             "warnings": [warning],
             "is_virtual": True,
             "archive": zip_path,
+            "archive_kind": "zip",
             "subfolder": parent_label,
             "is_unreadable": True,
         }
         return
 
-    for inner in sorted(names):
+    yield from _emit_archive_entries(zip_path, sorted(names), _vsizip_uri, "zip")
+
+
+# ---------------------------------------------------------------------------
+# RAR archives — GDAL /vsirar/ (requires GDAL >= 3.7 built with libarchive,
+# e.g. QGIS 3.44+). zipfile cannot read RAR, so members are enumerated via
+# gdal.ReadDirRecursive. Kept parallel to the ZIP path (which stays on the
+# stdlib zipfile module, unchanged and fully tested).
+# ---------------------------------------------------------------------------
+
+_rar_supported_cache: Optional[bool] = None
+
+
+def _gdal_vsi_prefixes() -> set:
+    """Return GDAL's registered virtual-filesystem prefixes (lazy import)."""
+    try:
+        from osgeo import gdal  # type: ignore[import-not-found]
+    except ImportError:
+        return set()
+    try:
+        return set(gdal.GetFileSystemsPrefixes())
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def rar_supported() -> bool:
+    """True when this GDAL build exposes the /vsirar/ filesystem."""
+    global _rar_supported_cache
+    if _rar_supported_cache is None:
+        _rar_supported_cache = "/vsirar/" in _gdal_vsi_prefixes()
+    return _rar_supported_cache
+
+
+def _reset_rar_support_cache() -> None:
+    """Test hook: clear the cached capability probe."""
+    global _rar_supported_cache
+    _rar_supported_cache = None
+
+
+def _vsirar_uri(rar_path: Path, inner: str) -> str:
+    """Build a GDAL /vsirar/ URI. Forward slashes for OGR portability."""
+    r = str(rar_path.resolve()).replace("\\", "/")
+    return f"/vsirar/{r}/{inner.lstrip('/')}"
+
+
+def _list_rar_members(rar_path: Path) -> List[str]:
+    """List file members of a RAR archive via gdal.ReadDirRecursive.
+
+    Isolated so tests can monkeypatch it without a real GDAL/libarchive.
+    """
+    from osgeo import gdal  # type: ignore[import-not-found]
+
+    r = str(rar_path.resolve()).replace("\\", "/")
+    listing = gdal.ReadDirRecursive(f"/vsirar/{r}")
+    return list(listing or [])
+
+
+def _iter_rar_vector_entries(rar_path: Path) -> Iterable[Dict[str, object]]:
+    """
+    Yield one metadata dict per supported vector file inside `rar_path`.
+
+    Mirrors `_iter_zip_vector_entries`: same OneDrive-placeholder guard,
+    same warning-entry shape on failure, plus a capability warning when
+    this GDAL build lacks /vsirar/.
+    """
+    accessible_path = _long_path(rar_path)
+    is_online_only_placeholder = False
+    try:
+        if not os.path.isfile(accessible_path):
+            is_online_only_placeholder = True
+    except OSError:
+        is_online_only_placeholder = True
+
+    parent_label = rar_path.parent.name or "unsorted"
+
+    def _warning_entry(message: str) -> Dict[str, object]:
+        return {
+            "path": rar_path,
+            "format": "rar",
+            "name": rar_path.stem,
+            "item_type": "vector",
+            "geometry_type": "Unknown",
+            "crs": "Unknown",
+            "feature_count": 0,
+            "encoding": "UTF-8",
+            "warnings": [message],
+            "is_virtual": True,
+            "archive": rar_path,
+            "archive_kind": "rar",
+            "subfolder": parent_label,
+            "is_unreadable": True,
+        }
+
+    if is_online_only_placeholder:
+        yield _warning_entry(
+            "File non disponibile localmente. Probabilmente è un "
+            "placeholder OneDrive/cloud non ancora scaricato: "
+            "tasto destro sul file in Esplora risorse → "
+            "'Mantieni sempre su questo dispositivo', poi riprova."
+        )
+        return
+
+    if not rar_supported():
+        yield _warning_entry(
+            "Il GDAL di questa installazione QGIS non supporta gli archivi "
+            "RAR (/vsirar/, richiede GDAL ≥ 3.7 con libarchive — disponibile "
+            "in QGIS 3.44+). Aggiorna QGIS oppure estrai/riconverti "
+            "l'archivio in .zip."
+        )
+        return
+
+    try:
+        names = _list_rar_members(rar_path)
+    except Exception as exc:  # noqa: BLE001
+        yield _warning_entry(f"Cannot open RAR: {exc}")
+        return
+
+    yield from _emit_archive_entries(rar_path, sorted(names), _vsirar_uri, "rar")
+
+
+def _emit_archive_entries(
+    archive_path: Path, names, uri_builder, kind: str
+) -> Iterable[Dict[str, object]]:
+    """Shared body: turn archive member names into converter item dicts.
+
+    `uri_builder(archive_path, inner)` builds the /vsizip/ or /vsirar/ URI.
+    """
+    parent_label = archive_path.parent.name or "unsorted"
+    for inner in names:
         if inner.endswith("/"):
             continue
         ext = Path(inner).suffix.lower()
-        if ext not in _ZIP_INNER_EXTENSIONS:
+        if ext not in _ARCHIVE_INNER_EXTENSIONS:
             continue
-        uri = _vsizip_uri(zip_path, inner)
-        # Layer name: prefix with the zip stem when the inner shapefile
-        # would collide on a generic name. Always include the zip stem
-        # so layers from sibling zips in the same group remain traceable.
+        uri = uri_builder(archive_path, inner)
+        # Layer name: always include the archive stem so layers from
+        # sibling archives in the same group remain traceable, but avoid
+        # a redundant "stem__stem" when the inner file matches the stem.
         inner_stem = Path(inner).stem
-        layer_name = inner_stem if inner_stem == zip_path.stem else f"{zip_path.stem}__{inner_stem}"
-        parent_label = zip_path.parent.name or "unsorted"
+        layer_name = (
+            inner_stem
+            if inner_stem == archive_path.stem
+            else f"{archive_path.stem}__{inner_stem}"
+        )
         yield {
             # Use the archive path (a real file on disk) so callers'
             # `.exists()` checks succeed; the OGR-friendly URI lives
             # in `uri` and is preferred by the converter.
-            "path": zip_path,
+            "path": archive_path,
             "uri": uri,
             "format": SUPPORTED_EXTENSIONS[ext],
             "name": layer_name,
             "item_type": "vector",
             "is_virtual": True,
-            "archive": zip_path,
+            "archive": archive_path,
+            "archive_kind": kind,
             "subfolder": parent_label,
             "inner_path": inner,
         }
@@ -376,7 +512,12 @@ def scan_folder(
 
         # Archives: expand into one entry per inner vector file.
         if ext in _ARCHIVE_EXTENSIONS:
-            for entry in _iter_zip_vector_entries(file_path):
+            archive_iter = (
+                _iter_rar_vector_entries(file_path)
+                if ext == ".rar"
+                else _iter_zip_vector_entries(file_path)
+            )
+            for entry in archive_iter:
                 if "format" in entry and "geometry_type" not in entry:
                     meta = _inspect_with_qgis(entry["uri"])
                     entry["geometry_type"] = meta["geometry_type"]

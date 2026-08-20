@@ -282,3 +282,92 @@ def test_inspector_warnings_appear_in_result(tmp_path, monkeypatch):
     _touch(tmp_path / "x.geojson")
     [item] = scan_folder(tmp_path, recursive=False)
     assert "CRS not recognised" in item["warnings"]
+
+
+# ---------------------------------------------------------------------------
+# RAR archives (/vsirar/). zipfile can't make .rar, so we mock the two
+# isolated seams: rar_supported() and _list_rar_members().
+# ---------------------------------------------------------------------------
+
+
+def _enable_rar(monkeypatch, members):
+    monkeypatch.setattr(folder_scanner, "rar_supported", lambda: True)
+    monkeypatch.setattr(folder_scanner, "_list_rar_members", lambda p: list(members))
+
+
+def test_rar_expanded_into_virtual_items(tmp_path, monkeypatch):
+    _touch(tmp_path / "data.rar")
+    _enable_rar(monkeypatch, ["roads/main.shp", "roads/main.dbf", "readme.txt"])
+    results = scan_folder(tmp_path, recursive=False)
+    assert [r["name"] for r in results] == ["data__main"]
+    r = results[0]
+    assert r["is_virtual"] is True
+    assert r["archive_kind"] == "rar"
+    assert r["uri"].startswith("/vsirar/")
+    assert r["uri"].endswith(".shp")
+    assert r["subfolder"] == tmp_path.name
+
+
+def test_rar_unsupported_yields_capability_warning(tmp_path, monkeypatch):
+    _touch(tmp_path / "data.rar")
+    monkeypatch.setattr(folder_scanner, "rar_supported", lambda: False)
+    results = scan_folder(tmp_path, recursive=False)
+    assert len(results) == 1
+    assert results[0]["is_unreadable"] is True
+    assert results[0]["format"] == "rar"
+    assert any("RAR" in w for w in results[0]["warnings"])
+
+
+def test_rar_open_failure_yields_warning(tmp_path, monkeypatch):
+    _touch(tmp_path / "data.rar")
+    monkeypatch.setattr(folder_scanner, "rar_supported", lambda: True)
+
+    def boom(_):
+        raise RuntimeError("libarchive error")
+
+    monkeypatch.setattr(folder_scanner, "_list_rar_members", boom)
+    results = scan_folder(tmp_path, recursive=False)
+    assert len(results) == 1
+    assert any("Cannot open RAR" in w for w in results[0]["warnings"])
+
+
+def test_rar_name_prefixing_matches_stem(tmp_path, monkeypatch):
+    # When the inner file stem matches the archive stem, no "__" prefix.
+    _touch(tmp_path / "comuni.rar")
+    _enable_rar(monkeypatch, ["comuni.shp"])
+    [r] = scan_folder(tmp_path, recursive=False)
+    assert r["name"] == "comuni"
+
+
+def test_rar_and_zip_and_loose_coexist(tmp_path, monkeypatch):
+    _make_zip(tmp_path / "z.zip", [("inner.shp", b"x")])
+    _touch(tmp_path / "r.rar")
+    _touch(tmp_path / "loose.geojson")
+    _enable_rar(monkeypatch, ["layer.shp"])
+    results = scan_folder(tmp_path, recursive=False)
+    by_name = {r["name"]: r for r in results}
+    assert set(by_name) == {"z__inner", "r__layer", "loose"}
+    assert by_name["z__inner"]["archive_kind"] == "zip"
+    assert by_name["r__layer"]["archive_kind"] == "rar"
+
+
+def test_rar_mirror_hierarchy_subfolder(tmp_path, monkeypatch):
+    _touch(tmp_path / "A" / "B" / "data.rar")
+    _enable_rar(monkeypatch, ["x.shp"])
+    results = scan_folder(tmp_path, mirror_hierarchy=True)
+    assert results[0]["subfolder"] == "A/B"
+
+
+def test_rar_supported_cached(monkeypatch):
+    folder_scanner._reset_rar_support_cache()
+    calls = []
+
+    def fake_prefixes():
+        calls.append(1)
+        return {"/vsirar/", "/vsizip/"}
+
+    monkeypatch.setattr(folder_scanner, "_gdal_vsi_prefixes", fake_prefixes)
+    assert folder_scanner.rar_supported() is True
+    assert folder_scanner.rar_supported() is True
+    assert len(calls) == 1  # probed once, then cached
+    folder_scanner._reset_rar_support_cache()

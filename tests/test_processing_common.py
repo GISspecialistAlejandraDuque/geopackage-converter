@@ -49,7 +49,8 @@ def test_apply_grouping_by_legend_group(tmp_path):
     bundles = apply_grouping(GROUPING_BY_LEGEND_GROUP, _items(), tmp_path / "out.gpkg")
     names = {b["output_path"].name for b in bundles}
     assert "Infra.gpkg" in names
-    assert "ungrouped.gpkg" in names
+    # Ungrouped layers get an individual GPKG named after the layer (0.2.0+).
+    assert "a.gpkg" in names
 
 
 def test_apply_grouping_unknown_index_raises(tmp_path):

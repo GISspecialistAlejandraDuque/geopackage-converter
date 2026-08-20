@@ -20,18 +20,17 @@ _TEMPLATE_PATH = _RESOURCES_DIR / "report_template.html"
 
 
 def _get_locale_template() -> Path:
-    """Return the report template matching the QGIS locale, falling back to Italian."""
-    try:
-        from qgis.PyQt.QtCore import QSettings
-        override = QSettings().value("locale/userLocale") or ""
-        locale = (override or "")[:2].lower()
-    except Exception:
-        locale = ""
-    if locale and locale != "it":
-        localized = _RESOURCES_DIR / f"report_template_{locale}.html"
-        if localized.is_file():
-            return localized
-    return _TEMPLATE_PATH
+    """Return the report template matching the resolved locale.
+
+    Italian uses the base template; English and Spanish use their own;
+    any other locale falls back to the English template (see
+    ``_get_locale_code``), never to Italian.
+    """
+    locale = _get_locale_code()
+    if locale == "it":
+        return _TEMPLATE_PATH
+    localized = _RESOURCES_DIR / f"report_template_{locale}.html"
+    return localized if localized.is_file() else _TEMPLATE_PATH
 
 
 def _format_duration(seconds: float) -> str:
@@ -82,18 +81,28 @@ _I18N = {
 }
 
 
+_SUPPORTED_LOCALES = ("it", "en", "es")
+
+
 def _get_locale_code() -> str:
+    """Resolve the report language to one of it/en/es.
+
+    Mirrors ``plugin._install_translator``: Italian is the source
+    language; English and Spanish have their own translations; any other
+    locale (or an undetectable one) falls back to English.
+    """
     try:
-        from qgis.PyQt.QtCore import QSettings
-        override = QSettings().value("locale/userLocale") or ""
-        return (override or "")[:2].lower() or "it"
+        from qgis.PyQt.QtCore import QLocale, QSettings
+        override = QSettings().value("locale/userLocale") or QLocale().name()
+        locale = (override or "")[:2].lower()
     except Exception:
-        return "it"
+        locale = ""
+    return locale if locale in _SUPPORTED_LOCALES else "en"
 
 
 def _t(key: str) -> str:
     locale = _get_locale_code()
-    return _I18N.get(locale, _I18N["it"]).get(key, _I18N["it"][key])
+    return _I18N.get(locale, _I18N["en"]).get(key, _I18N["en"][key])
 
 
 def _render_output_files(result: ConversionResult) -> str:

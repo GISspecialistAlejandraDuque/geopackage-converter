@@ -82,7 +82,9 @@ class ConvertFolderToGeoPackageAlgorithm(QgsProcessingAlgorithm):
             "Esegue la scansione della cartella di input e converte tutti "
             "i file supportati in uno o più GeoPackage.\n\n"
             "Vettoriali: SHP, TAB, KML, KMZ, GML, GeoJSON, DXF, GPX, MIF\n"
-            "Raster: GeoTIFF, JP2, ECW, IMG, ASC, VRT"
+            "Raster: GeoTIFF, JP2, ECW, IMG, ASC, VRT\n"
+            "Archivi: ZIP, RAR (letti tramite GDAL /vsizip/ e /vsirar/, "
+            "niente estrazione; RAR richiede GDAL ≥ 3.7/libarchive)"
         )
 
     def initAlgorithm(self, config=None):  # noqa: N802
