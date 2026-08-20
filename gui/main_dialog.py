@@ -46,6 +46,16 @@ from qgis.PyQt.QtWidgets import (
 
 from ..compat import CHECKED, ITEM_IS_ENABLED, ITEM_IS_USER_CHECKABLE, UNCHECKED
 from ..core.converter import ConversionResult, Converter
+from ..core.provider_policy import (
+    ROUTE_FILE,
+    ROUTE_LIVE_VECTOR,
+    ROUTE_REMOTE_RASTER,
+    VSI_PREFIXES,
+    is_remote_provider,
+    provider_display_name,
+    route_for_provider,
+    source_label,
+)
 from ..core.raster_converter import RasterConverter
 from ..core.folder_scanner import scan_folder
 from ..core.grouping_strategies import (
@@ -144,9 +154,11 @@ class _ConversionTask(QgsTask):
         aggregate.errors.extend(r.errors)
         aggregate.output_layers.extend(r.output_layers)
         for err in r.errors:
-            self._log_lines.append(
-                f"  ❌ {Path(err['source']).name}: {err['message']}"
-            )
+            src = err["source"]
+            # Provider-labeled sources ("wfs: Comuni (…)") stay verbatim;
+            # only plain filesystem paths are shortened to the basename.
+            display = src if ": " in src else Path(src).name
+            self._log_lines.append(f"  ❌ {display}: {err['message']}")
         aggregate.warnings.extend(r.warnings)
         for p in r.output_files:
             if p not in aggregate.output_files:
@@ -334,6 +346,12 @@ class GeoPackageConverterDialog(QDialog):
         self.lblTileFormat.setText(self.tr("Formato tile:"))
         self.lblTileSize.setText(self.tr("Tile:"))
         self.lblJpegQuality.setText(self.tr("Qualità:"))
+        self.lblRemoteRaster.setText(self.tr("Raster remoti:"))
+        self.lblRemoteExtent.setText(self.tr("Estensione:"))
+        self.cmbRemoteExtent.setItemText(0, self.tr("Estensione intera del layer"))
+        self.cmbRemoteExtent.setItemText(1, self.tr("Estensione mappa corrente"))
+        self.lblRemoteRes.setText(self.tr("Risoluzione:"))
+        self.spnRemoteResolution.setSpecialValueText(self.tr("(nativa/auto)"))
         self.btnRun.setText(self.tr("Esegui"))
         self.btnCancel.setText(self.tr("Annulla"))
         self.btnClose.setText(self.tr("Chiudi"))
@@ -408,20 +426,30 @@ class GeoPackageConverterDialog(QDialog):
             return
         for layer in supported:
             crs = layer.crs().authid() if layer.crs().isValid() else "?"
-            if layer.type() == QgsMapLayer.RasterLayer:
+            is_raster = layer.type() == QgsMapLayer.RasterLayer
+            provider = layer.providerType()
+            # Non-file layers (WFS, ArcGIS REST, WCS, memory, CSV, PostGIS…)
+            # get a provider marker so the user sees they will be
+            # downloaded/materialised, not just re-read from disk.
+            marker = ""
+            if route_for_provider(provider, is_raster) != ROUTE_FILE:
+                marker = f"  [{provider_display_name(provider)}]"
+            if is_raster:
                 label = (
                     f"{layer.name()}  —  {crs}  "
                     f"({layer.width()}x{layer.height()}, "
                     f"{layer.bandCount()} {'banda' if layer.bandCount() == 1 else 'bande'})  "
-                    f"[Raster]"
+                    f"[Raster]{marker}"
                 )
             else:
-                label = f"{layer.name()}  —  {crs}  ({layer.featureCount()} feat.)"
+                feat_count = layer.featureCount()
+                feat_txt = "?" if feat_count < 0 else str(feat_count)
+                label = f"{layer.name()}  —  {crs}  ({feat_txt} feat.){marker}"
             item = QListWidgetItem(label)
             item.setFlags(item.flags() | ITEM_IS_USER_CHECKABLE | ITEM_IS_ENABLED)
             item.setCheckState(CHECKED)
             item.setData(Qt.ItemDataRole.UserRole, layer.id())
-            item.setToolTip(str(layer.source()))
+            item.setToolTip(f"{provider}: {layer.source()}")
             self.lstProjectLayers.addItem(item)
 
     def _install_tooltips(self) -> None:
@@ -569,8 +597,11 @@ class GeoPackageConverterDialog(QDialog):
             "<b>Vettoriali:</b> <code>.shp .tab .kml .kmz .gml .geojson "
             ".json .dxf .gpx .mif</code><br>"
             "<b>Raster:</b> <code>.tif .tiff .jp2 .ecw .img .asc .vrt</code><br><br>"
-            "Sono supportati anche file <code>.zip</code> contenenti shapefile "
-            "(letti tramite <code>/vsizip/</code>, niente estrazione)."
+            "Sono supportati anche archivi <code>.zip</code> e <code>.rar</code> "
+            "contenenti shapefile (letti tramite <code>/vsizip/</code> e "
+            "<code>/vsirar/</code>, niente estrazione). "
+            "Il supporto <code>.rar</code> richiede QGIS con GDAL ≥ 3.7/"
+            "libarchive (es. QGIS 3.44+)."
         ))
         self.lblFolder.setToolTip(self.edtFolder.toolTip())
         self.btnBrowseFolder.setToolTip(self.tr("Sfoglia per selezionare una cartella"))
@@ -675,6 +706,31 @@ class GeoPackageConverterDialog(QDialog):
         )
         self.lblJpegQuality.setToolTip(self.spnJpegQuality.toolTip())
 
+        # ----- Remote raster (WCS / ArcGIS MapServer / WMS) -----
+        apply(
+            self.cmbRemoteExtent,
+            self.tr(
+                "<b>Estensione del ritaglio remoto</b><br>"
+                "I raster remoti (WCS, ArcGIS MapServer, WMS) non hanno un file: "
+                "vengono scaricati alla porzione indicata.<br>"
+                "<i>Estensione intera del layer</i>: tutta la copertura del servizio.<br>"
+                "<i>Estensione mappa corrente</i>: solo l'area visibile nel canvas."
+            ),
+            self.tr("Porzione del raster remoto da scaricare"),
+        )
+        self.lblRemoteExtent.setToolTip(self.cmbRemoteExtent.toolTip())
+        apply(
+            self.spnRemoteResolution,
+            self.tr(
+                "<b>Risoluzione del ritaglio remoto</b><br>"
+                "Dimensione del pixel nelle unità del CRS del layer.<br>"
+                "<i>(nativa/auto)</i>: usa la risoluzione dichiarata dal servizio "
+                "oppure, se assente, un lato lungo di 4096 px."
+            ),
+            self.tr("Dimensione pixel del raster remoto (0 = auto)"),
+        )
+        self.lblRemoteRes.setToolTip(self.spnRemoteResolution.toolTip())
+
         # ----- Group box title -----
         self.grpOptions.setToolTip(self.tr(
             "Opzioni applicate sia alla modalità <i>Da progetto</i> sia <i>Da cartella</i>."
@@ -763,6 +819,13 @@ class GeoPackageConverterDialog(QDialog):
         self.lstProjectLayers.itemChanged.connect(self._on_project_layer_toggled)
         self.cmbGrouping.currentIndexChanged.connect(self._on_grouping_changed)
         self.chkMirrorStructure.toggled.connect(self._on_mirror_toggled)
+        # Remote-raster extent/resolution changes refresh the size estimate.
+        self.cmbRemoteExtent.currentIndexChanged.connect(
+            lambda _i: self._update_remote_raster_estimate()
+        )
+        self.spnRemoteResolution.valueChanged.connect(
+            lambda _v: self._update_remote_raster_estimate()
+        )
 
     # ------------------------------------------------------------------
     # Persistence
@@ -885,6 +948,7 @@ class GeoPackageConverterDialog(QDialog):
     def _update_raster_options_visibility(self) -> None:
         """Show raster option widgets only when raster items are present."""
         has_raster = False
+        remote_rasters = []
         if self.tabWidget.currentWidget() is self.tabFromProject:
             # Check if any checked layer is a raster.
             project = QgsProject.instance()
@@ -896,7 +960,8 @@ class GeoPackageConverterDialog(QDialog):
                 layer = project.mapLayer(layer_id) if (project and layer_id) else None
                 if layer is not None and layer.type() == QgsMapLayer.RasterLayer:
                     has_raster = True
-                    break
+                    if route_for_provider(layer.providerType(), is_raster=True) == ROUTE_REMOTE_RASTER:
+                        remote_rasters.append(layer)
         else:
             has_raster = any(
                 it.get("item_type") == "raster" for it in self._scan_results
@@ -907,6 +972,70 @@ class GeoPackageConverterDialog(QDialog):
             self.lblJpegQuality, self.spnJpegQuality,
         ):
             w.setVisible(has_raster)
+        # Remote-raster row: only when a remote raster is checked (project mode).
+        show_remote = bool(remote_rasters)
+        for w in (
+            self.lblRemoteRaster, self.lblRemoteExtent, self.cmbRemoteExtent,
+            self.lblRemoteRes, self.spnRemoteResolution, self.lblRemoteEstimate,
+        ):
+            w.setVisible(show_remote)
+        if show_remote:
+            self._update_remote_raster_estimate(remote_rasters)
+
+    def _update_remote_raster_estimate(self, remote_layers=None) -> None:
+        """Refresh the 'W×H px, ~X MB' estimate for checked remote rasters."""
+        from ..core.raster_converter import estimate_remote_pixels, is_output_huge
+
+        if remote_layers is None:
+            remote_layers = self._checked_remote_rasters()
+        if not remote_layers:
+            self.lblRemoteEstimate.setText("")
+            return
+        total_px = 0
+        total_bytes = 0
+        huge = False
+        for layer in remote_layers:
+            extent_tuple, xres, yres = self._remote_raster_params(layer)
+            w = extent_tuple[2] - extent_tuple[0]
+            h = extent_tuple[3] - extent_tuple[1]
+            px = estimate_remote_pixels(w, h, xres, yres)
+            bands = max(1, layer.bandCount())
+            total_px += px
+            total_bytes += px * bands  # ~1 byte/band uncompressed estimate
+            if is_output_huge(px, bands):
+                huge = True
+        px_w = max(1, round((extent_tuple[2] - extent_tuple[0]) / xres)) if xres else 0
+        px_h = max(1, round((extent_tuple[3] - extent_tuple[1]) / yres)) if yres else 0
+        mb = total_bytes / (1024 * 1024)
+        if len(remote_layers) == 1:
+            txt = self.tr("≈ {w} × {h} px, ~{mb:.0f} MB").format(w=px_w, h=px_h, mb=mb)
+        else:
+            txt = self.tr("≈ {n} raster, ~{mb:.0f} MB totali").format(
+                n=len(remote_layers), mb=mb
+            )
+        self.lblRemoteEstimate.setText(txt)
+        color = "#c0392b" if huge else ""
+        self.lblRemoteEstimate.setStyleSheet(f"color: {color};" if color else "")
+
+    def _checked_remote_rasters(self) -> list:
+        """Return the checked project layers that are remote rasters."""
+        out = []
+        if self.tabWidget.currentWidget() is not self.tabFromProject:
+            return out
+        project = QgsProject.instance()
+        for i in range(self.lstProjectLayers.count()):
+            wi = self.lstProjectLayers.item(i)
+            if wi.checkState() != CHECKED:
+                continue
+            layer_id = wi.data(Qt.ItemDataRole.UserRole)
+            layer = project.mapLayer(layer_id) if (project and layer_id) else None
+            if (
+                layer is not None
+                and layer.type() == QgsMapLayer.RasterLayer
+                and route_for_provider(layer.providerType(), is_raster=True) == ROUTE_REMOTE_RASTER
+            ):
+                out.append(layer)
+        return out
 
     def _maybe_suggest_output(self) -> None:
         """
@@ -1076,7 +1205,7 @@ class GeoPackageConverterDialog(QDialog):
                 self, self.tr("Cartella vuota"),
                 self.tr(
                     "La cartella selezionata non contiene file supportati.\n\n"
-                    "Vettoriali: SHP, TAB, KML, GML, GeoJSON, DXF, GPX, MIF, ZIP\n"
+                    "Vettoriali: SHP, TAB, KML, GML, GeoJSON, DXF, GPX, MIF, ZIP, RAR\n"
                     "Raster: GeoTIFF, JP2, ECW, IMG, ASC, VRT"
                 ),
             )
@@ -1107,7 +1236,8 @@ class GeoPackageConverterDialog(QDialog):
             if it.get("is_virtual"):
                 archive = it.get("archive")
                 inner = it.get("inner_path", "")
-                display_format = f"{display_format} (zip)"
+                kind = it.get("archive_kind") or "zip"
+                display_format = f"{display_format} ({kind})"
                 if archive:
                     tooltip = f"{archive} → {inner}"
             # Raster items show dimensions instead of feature count / encoding.
@@ -1232,7 +1362,7 @@ class GeoPackageConverterDialog(QDialog):
         is_virtual = False
         uri = None
         normalised = raw_source.replace("\\", "/")
-        for prefix in ("/vsizip/", "/vsigzip/", "/vsitar/", "/vsicurl/", "/vsis3/"):
+        for prefix in VSI_PREFIXES:
             if normalised.startswith(prefix) or normalised.lstrip("/").startswith(prefix.lstrip("/")):
                 is_virtual = True
                 if not normalised.startswith("/"):
@@ -1259,6 +1389,22 @@ class GeoPackageConverterDialog(QDialog):
             item["is_virtual"] = True
             item["uri"] = uri
 
+        # Non-file providers (WFS, ArcGIS REST, memory, CSV, PostGIS…):
+        # "ogr" cannot re-open their URI, so hand the writer a clone of
+        # the live layer instead. The clone is created here on the main
+        # thread, is detached from the project (safe if the original is
+        # edited/removed mid-task) and downloads features lazily inside
+        # the worker thread.
+        provider = layer.providerType()
+        if route_for_provider(provider, is_raster=False) == ROUTE_LIVE_VECTOR:
+            item["layer_ref"] = layer.clone()
+            item["provider"] = provider
+            item["source_label"] = source_label(provider, layer.name(), full_source)
+            if is_remote_provider(provider):
+                item["is_remote"] = True
+            item.pop("uri", None)
+            item["path"] = None
+
         # Snapshot the live style XML so the converter can persist *the
         # user's symbology*, not a default re-derived from the file.
         try:
@@ -1273,12 +1419,13 @@ class GeoPackageConverterDialog(QDialog):
             pass
         return item
 
-    @staticmethod
-    def _build_raster_project_item(layer, legend_group: str) -> dict:
+    def _build_raster_project_item(self, layer, legend_group: str) -> dict:
         """Build a converter-friendly item dict from a QgsRasterLayer.
 
         Detects GDAL virtual sources (``/vsizip/``, ``/vsicurl/``, …)
         so the raster converter doesn't trip on ``.exists()`` checks.
+        Remote rasters (WCS, ArcGIS MapServer, WMS) instead carry a live
+        layer clone plus the snapshot extent/resolution chosen in the UI.
         """
         full_source = layer.source()
         raw_source = full_source.split("|", 1)[0]
@@ -1286,7 +1433,7 @@ class GeoPackageConverterDialog(QDialog):
         is_virtual = False
         uri = None
         normalised = raw_source.replace("\\", "/")
-        for prefix in ("/vsizip/", "/vsigzip/", "/vsitar/", "/vsicurl/", "/vsis3/"):
+        for prefix in VSI_PREFIXES:
             if normalised.startswith(prefix) or normalised.lstrip("/").startswith(prefix.lstrip("/")):
                 is_virtual = True
                 if not normalised.startswith("/"):
@@ -1310,7 +1457,118 @@ class GeoPackageConverterDialog(QDialog):
         if is_virtual:
             item["is_virtual"] = True
             item["uri"] = uri
+
+        provider = layer.providerType()
+        if route_for_provider(provider, is_raster=True) == ROUTE_REMOTE_RASTER:
+            extent, xres, yres = self._remote_raster_params(layer)
+            item["layer_ref"] = layer.clone()
+            item["provider"] = provider
+            item["source_label"] = source_label(provider, layer.name(), full_source)
+            item["is_remote"] = True
+            item["raster_extent"] = extent
+            item["raster_xres"] = xres
+            item["raster_yres"] = yres
+            # Truthful preview dimensions from the chosen extent/resolution.
+            item["raster_width"] = max(1, round((extent[2] - extent[0]) / xres)) if xres else 0
+            item["raster_height"] = max(1, round((extent[3] - extent[1]) / yres)) if yres else 0
+            item.pop("uri", None)
+            item["path"] = None
         return item
+
+    def _remote_raster_params(self, layer):
+        """
+        Resolve (extent_tuple, xres, yres) for a remote raster from the UI.
+
+        Extent is the full layer extent or the current map canvas extent
+        (transformed to the layer CRS), per the ``cmbRemoteExtent`` choice.
+        Resolution is the spin-box value (CRS units) or, when 0/auto, the
+        provider's native resolution falling back to a 4096px long edge.
+        """
+        from ..core.raster_converter import default_remote_resolution
+
+        ext = layer.extent()
+        use_canvas = (
+            self._has_remote_extent_control()
+            and self.cmbRemoteExtent.currentIndex() == 1
+            and self.iface is not None
+        )
+        if use_canvas:
+            try:
+                from qgis.core import (
+                    QgsCoordinateTransform,
+                    QgsProject,
+                )
+
+                canvas = self.iface.mapCanvas()
+                canvas_extent = canvas.extent()
+                canvas_crs = canvas.mapSettings().destinationCrs()
+                if canvas_crs != layer.crs():
+                    xform = QgsCoordinateTransform(
+                        canvas_crs, layer.crs(), QgsProject.instance()
+                    )
+                    canvas_extent = xform.transformBoundingBox(canvas_extent)
+                # Clamp to the layer's own extent so we never request
+                # outside the service coverage.
+                canvas_extent = canvas_extent.intersect(ext)
+                if not canvas_extent.isEmpty():
+                    ext = canvas_extent
+            except Exception:  # noqa: BLE001 - fall back to full extent
+                pass
+
+        extent_tuple = (ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum())
+
+        res = 0.0
+        if self._has_remote_extent_control():
+            res = float(self.spnRemoteResolution.value())
+        if res > 0:
+            xres = yres = res
+        else:
+            provider = layer.dataProvider()
+            xres, yres = default_remote_resolution(
+                ext.width(),
+                ext.height(),
+                provider.xSize() if provider else 0,
+                provider.ySize() if provider else 0,
+            )
+        return extent_tuple, xres, yres
+
+    def _has_remote_extent_control(self) -> bool:
+        return hasattr(self, "cmbRemoteExtent") and self.cmbRemoteExtent is not None
+
+    def _confirm_remote_raster_size(self, items) -> bool:
+        """Ask the user to confirm when a remote-raster snapshot is huge.
+
+        Returns True to proceed, False to abort the run.
+        """
+        from ..core.raster_converter import estimate_remote_pixels, is_output_huge
+
+        huge_any = False
+        for it in items:
+            if it.get("item_type") != "raster" or not it.get("is_remote"):
+                continue
+            ext = it.get("raster_extent")
+            xres = it.get("raster_xres") or 0
+            yres = it.get("raster_yres") or 0
+            if not ext or not xres or not yres:
+                continue
+            px = estimate_remote_pixels(ext[2] - ext[0], ext[3] - ext[1], xres, yres)
+            if is_output_huge(px, it.get("band_count", 1)):
+                huge_any = True
+                break
+        if not huge_any:
+            return True
+        reply = QMessageBox.question(
+            self,
+            self.tr("Output molto grande"),
+            self.tr(
+                "L'output stimato di uno o più raster remoti è molto grande "
+                "e il download potrebbe richiedere molto tempo o spazio.\n\n"
+                "Vuoi continuare?"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return reply == QMessageBox.Yes
 
     def _run(self) -> None:
         items = self._collect_items()
@@ -1325,6 +1583,9 @@ class GeoPackageConverterDialog(QDialog):
             QMessageBox.information(
                 self, self.tr("Nessun elemento"), msg,
             )
+            return
+        # Warn before downloading a very large remote-raster snapshot.
+        if not self._confirm_remote_raster_size(items):
             return
         output = self.edtOutput.text().strip()
         if not output:

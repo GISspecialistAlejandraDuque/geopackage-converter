@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-QGIS plugin (v0.2.1) that batch-converts vector and raster files to GeoPackage. Supports QGIS 3.34+ (Qt5) through 4.x (Qt6). UI language is Italian (source), with English and Spanish translations. License: GPL-3.0-or-later.
+QGIS plugin (v0.3.0) that batch-converts vector and raster files to GeoPackage. Supports QGIS 3.34+ (Qt5) through 4.x (Qt6). UI language is Italian (source), with English and Spanish translations. License: GPL-3.0-or-later.
+
+Since 0.3.0 it also converts, in project mode, remote and non-file layers (WFS/OGC API Features, ArcGIS REST FeatureServer, memory, delimited-text/CSV, PostGIS, SpatiaLite as vectors; WCS/ArcGIS MapServer/WMS as rasters with editable extent/resolution), and reads `.rar` archives in folder mode via GDAL `/vsirar/`.
 
 ## Build & Development Commands
 
@@ -46,9 +48,14 @@ plugin.py            → GeoPackageConverterPlugin (toolbar, menu, action)
 compat.py            → Qt5/Qt6 shim (QAction import, enum aliases, exec_dialog)
 
 core/
+  provider_policy.py → route_for_provider(): file vs live-vector vs remote-raster;
+                        single source for VSI_PREFIXES and provider display labels
   converter.py       → Converter: vector → GPKG via QgsVectorFileWriter
-  raster_converter.py→ RasterConverter: raster → GPKG tiles via gdal.Translate
-  folder_scanner.py  → Recursive FS scan (vector + raster formats, ZIP via /vsizip/)
+                        (accepts a live QgsVectorLayer for remote/non-file sources)
+  raster_converter.py→ RasterConverter: raster → GPKG tiles via gdal.Translate;
+                        _write_remote_raster(): pipe snapshot → temp GTiff → tiles
+  folder_scanner.py  → Recursive FS scan (vector + raster formats, ZIP via /vsizip/,
+                        RAR via /vsirar/ with rar_supported() capability check)
   grouping_strategies.py → Bundling: all-in-one, per-subfolder, per-legend-group
   report_generator.py→ HTML report from ConversionResult
   encoding_detector.py, crs_presets.py, exceptions.py, _paths.py
@@ -73,6 +80,9 @@ processing/
 - **Raster style limitation**: GeoPackage cannot store raster styles (GDAL limitation). In project mode, the plugin clones the full style from the original layer via `exportNamedStyle`/`importNamedStyle` after loading the converted raster.
 - **Tree snapshot**: In project mode, `_snapshot_layer_tree()` captures layer order/groups/visibility before conversion. `_add_layers_from_snapshot()` replays it when loading converted layers. The snapshot must be cleared when switching to folder mode.
 - **ConversionResult.output_layers**: List of `(gpkg_path, layer_name)` tuples. Only populated when `layer_name` is non-empty in `add_success()`.
+- **Live-layer clone (remote/non-file sources)**: for providers other than `ogr`/`gdal`, the item builders store `item["layer_ref"] = layer.clone()`, created **on the main thread** before the QgsTask starts. The clone is detached from the project (safe if the original is edited/removed mid-task), downloads lazily inside the worker, and is `pop()`-ed after each item. The converters skip the `.exists()` gate when `layer_ref` is present and label errors with `item["source_label"]` instead of a fake path.
+- **RAR capability**: `folder_scanner.rar_supported()` probes `gdal.GetFileSystemsPrefixes()` for `/vsirar/` (cached). When absent, a `.rar` yields a single `is_unreadable` warning entry and the rest of the scan proceeds. ZIP stays on the stdlib `zipfile` module; RAR uses `gdal.ReadDirRecursive`. Never feed a `/vsi*` URI through `_paths.long_path`.
+- **Language fallback**: `plugin._install_translator` and `report_generator._get_locale_code` resolve the QGIS locale to it/en/es; any other locale falls back to **English**, not the Italian source.
 
 ## Packaging for QGIS Plugin Repository
 

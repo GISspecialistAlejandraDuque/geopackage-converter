@@ -214,16 +214,21 @@ def test_by_legend_group_buckets_per_group(tmp_path):
     }
 
 
-def test_by_legend_group_missing_or_empty_to_ungrouped(tmp_path):
+def test_by_legend_group_missing_or_empty_get_individual_gpkg(tmp_path):
+    # Since 0.2.0 ungrouped layers each get their own GPKG named after
+    # the layer, instead of being lumped into a single ungrouped.gpkg.
     items = [
         _item(name="a"),
         _item(name="b", legend_group=""),
         _item(name="c", legend_group=None),
     ]
     result = group_by_legend_group(items, tmp_path)
-    assert len(result) == 1
-    assert result[0]["output_path"].name == "ungrouped.gpkg"
-    assert [i["name"] for i in result[0]["items"]] == ["a", "b", "c"]
+    by_name = {b["output_path"].name: [i["name"] for i in b["items"]] for b in result}
+    assert by_name == {
+        "a.gpkg": ["a"],
+        "b.gpkg": ["b"],
+        "c.gpkg": ["c"],
+    }
 
 
 def test_by_legend_group_sanitizes_name(tmp_path):

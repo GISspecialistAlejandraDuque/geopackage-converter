@@ -47,14 +47,27 @@ class GeoPackageConverterPlugin:
     # ------------------------------------------------------------------
 
     def _install_translator(self) -> None:
-        """Load the .qm file matching the QGIS locale, if available."""
+        """Load the .qm file matching the QGIS locale.
+
+        Italian is the plugin's source language, so it needs no `.qm`.
+        For every other locale we load the matching translation when it
+        exists (English, Spanish); when it does not (e.g. German, French),
+        we fall back to **English** rather than leaving the user with the
+        Italian source strings — English is the more useful lingua franca
+        for an internationally distributed plugin.
+        """
         override = QSettings().value("locale/userLocale") or QLocale().name()
         locale = (override or "")[:2].lower()
         if locale == "it":
             return  # Italian is the source language — no translation needed.
+
         qm_path = PLUGIN_DIR / "i18n" / f"geopackage_converter_{locale}.qm"
         if not qm_path.is_file():
-            return
+            # No translation for this locale: default to English.
+            qm_path = PLUGIN_DIR / "i18n" / "geopackage_converter_en.qm"
+            if not qm_path.is_file():
+                return
+
         translator = QTranslator()
         if translator.load(str(qm_path)):
             QCoreApplication.installTranslator(translator)

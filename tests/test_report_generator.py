@@ -45,8 +45,36 @@ def test_output_files_listed(tmp_path):
 
 
 def test_no_output_files_shows_empty_message(tmp_path):
+    # With no detectable QGIS locale the report defaults to English.
+    text = generate_html_report(_result(), tmp_path / "r.html").read_text(encoding="utf-8")
+    assert "No files generated" in text
+
+
+def test_locale_defaults_to_english_when_unknown(tmp_path, monkeypatch):
+    """A locale without its own translation (e.g. German) falls back to English."""
+    import geopackage_converter.core.report_generator as rg
+
+    monkeypatch.setattr(rg, "_get_locale_code", lambda: "en")
+    text = generate_html_report(_result(), tmp_path / "r.html").read_text(encoding="utf-8")
+    assert 'lang="en"' in text
+    assert "No files generated" in text
+
+
+def test_locale_italian_uses_italian_strings(tmp_path, monkeypatch):
+    import geopackage_converter.core.report_generator as rg
+
+    monkeypatch.setattr(rg, "_get_locale_code", lambda: "it")
     text = generate_html_report(_result(), tmp_path / "r.html").read_text(encoding="utf-8")
     assert "Nessun file generato" in text
+
+
+def test_get_locale_code_falls_back_to_english(monkeypatch):
+    """German/French/etc. resolve to English, not Italian."""
+    import geopackage_converter.core.report_generator as rg
+
+    # No QGIS in the test env → the import in _get_locale_code raises →
+    # locale is "" → resolves to English.
+    assert rg._get_locale_code() == "en"
 
 
 def test_errors_table_rendered(tmp_path):

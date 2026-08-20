@@ -34,6 +34,55 @@ from .exceptions import RasterConversionError
 TILE_FORMATS = ("AUTO", "PNG", "JPEG", "WEBP")
 TILE_SIZES = (256, 512)
 
+# Remote-raster defaults: when the service does not report a native
+# size, the snapshot's long edge is capped at this many pixels.
+DEFAULT_REMOTE_MAX_PX = 4096
+# Above this many pixels (width*height*bands) the UI warns the user
+# that the snapshot will be very heavy.
+HUGE_OUTPUT_THRESHOLD_PX = 200_000_000
+
+
+# ---------------------------------------------------------------------------
+# Pure helpers for remote-raster sizing (no QGIS — unit-testable)
+# ---------------------------------------------------------------------------
+
+
+def default_remote_resolution(
+    extent_w: float,
+    extent_h: float,
+    provider_xsize: int = 0,
+    provider_ysize: int = 0,
+    max_default_px: int = DEFAULT_REMOTE_MAX_PX,
+) -> tuple:
+    """
+    Propose (xres, yres) in CRS units for a remote raster snapshot.
+
+    Native resolution when the provider reports its size (WCS usually
+    does); otherwise size the long edge to ``max_default_px``.
+    """
+    if extent_w <= 0 or extent_h <= 0:
+        return (1.0, 1.0)
+    if provider_xsize > 0 and provider_ysize > 0:
+        return (extent_w / provider_xsize, extent_h / provider_ysize)
+    res = max(extent_w, extent_h) / max(1, max_default_px)
+    return (res, res)
+
+
+def estimate_remote_pixels(
+    extent_w: float, extent_h: float, xres: float, yres: float
+) -> int:
+    """Width*height in pixels for a snapshot at the given resolution."""
+    if extent_w <= 0 or extent_h <= 0 or xres <= 0 or yres <= 0:
+        return 0
+    return max(1, round(extent_w / xres)) * max(1, round(extent_h / yres))
+
+
+def is_output_huge(
+    pixels: int, band_count: int = 1, threshold_px: int = HUGE_OUTPUT_THRESHOLD_PX
+) -> bool:
+    """True when the estimated snapshot is heavy enough to warn about."""
+    return pixels * max(1, band_count) > threshold_px
+
 
 class RasterConverter:
     """
@@ -97,34 +146,45 @@ class RasterConverter:
                 return result
 
         total = len(items)
+        remote_converted = 0
         for index, item in enumerate(items, start=1):
             name = str(item.get("name") or "raster")
             source = item.get("path")
+            live_layer = item.get("layer_ref")
+            label = str(item.get("source_label") or source or name)
             self._emit_progress(
                 progress_callback,
                 int(100 * (index - 1) / total),
                 f"Converting raster {name}",
             )
 
-            if not source:
+            if not source and live_layer is None:
                 result.add_error(name, "Item missing 'path'")
                 continue
             if item.get("is_unreadable"):
                 msg = (item.get("warnings") or ["File non leggibile"])[0]
-                result.add_error(str(source), msg)
+                result.add_error(label, msg)
                 continue
-            source_path = Path(source)
-            if not item.get("is_virtual") and not source_path.exists():
-                result.add_error(str(source_path), "Source file does not exist")
-                continue
+            if live_layer is None:
+                source_path = Path(source)
+                if not item.get("is_virtual") and not source_path.exists():
+                    result.add_error(label, "Source file does not exist")
+                    continue
 
             try:
                 self._process_item(item, output_path, result)
+                if item.get("is_remote"):
+                    remote_converted += 1
             except RasterConversionError as exc:
-                result.add_error(str(source_path), str(exc))
+                result.add_error(label, str(exc))
             except Exception as exc:  # noqa: BLE001
-                result.add_error(str(source_path), f"Unexpected raster error: {exc}")
+                result.add_error(label, f"Unexpected raster error: {exc}")
 
+        if remote_converted:
+            result.add_warning(
+                f"{remote_converted} remote raster(s) sampled and converted "
+                "(WCS/ArcGIS/WMS...)"
+            )
         self._emit_progress(progress_callback, 100, "Raster conversion done")
         result.duration_seconds = time.monotonic() - start
         return result
@@ -140,21 +200,124 @@ class RasterConverter:
         result: ConversionResult,
     ) -> None:
         name = str(item["name"])
-        source_str = str(item.get("uri") or item["path"])
+        source_str = str(item.get("uri") or item.get("path") or item.get("source_label") or name)
 
-        if self.dry_run:
+        try:
+            if self.dry_run:
+                result.add_success(output_path, layer_name=name, is_raster=True)
+                result.add_warning(f"[dry-run] Would write raster '{name}' to {output_path.name}")
+                return
+
+            if item.get("layer_ref") is not None:
+                error_msg = self._write_remote_raster(
+                    item, raster_table=name, output_path=output_path
+                )
+            else:
+                error_msg = self._write_raster(
+                    source_path=source_str,
+                    raster_table=name,
+                    output_path=output_path,
+                )
+            if error_msg:
+                raise RasterConversionError(error_msg)
             result.add_success(output_path, layer_name=name, is_raster=True)
-            result.add_warning(f"[dry-run] Would write raster '{name}' to {output_path.name}")
-            return
+        finally:
+            # Release the live layer clone as soon as the item is done.
+            item.pop("layer_ref", None)
 
-        error_msg = self._write_raster(
-            source_path=source_str,
-            raster_table=name,
-            output_path=output_path,
-        )
-        if error_msg:
-            raise RasterConversionError(error_msg)
-        result.add_success(output_path, layer_name=name, is_raster=True)
+    # ------------------------------------------------------------------
+    # Remote raster (WCS/ArcGIS MapServer/WMS): pipe snapshot → temp
+    # GeoTIFF → the standard _write_raster GPKG-tiling path.
+    # ------------------------------------------------------------------
+
+    def _write_remote_raster(
+        self,
+        item: Dict,
+        raster_table: str,
+        output_path: Path,
+    ) -> Optional[str]:
+        """
+        Materialise a remote raster provider into a temporary GeoTIFF via
+        the QGIS raster pipe, then convert it to GPKG tiles through the
+        existing `_write_raster()` (reusing tile format/size/quality and
+        the reprojection branch). Returns None on success or an error
+        message on failure.
+
+        The snapshot is written in the layer's own CRS at the extent and
+        resolution carried by the item (`raster_extent`,
+        `raster_xres`/`raster_yres`); a target CRS, if any, is applied by
+        `_write_raster` on the temp file.
+        """
+        import shutil
+        import tempfile
+
+        try:
+            from qgis.core import (
+                QgsCoordinateTransformContext,
+                QgsRasterFileWriter,
+                QgsRasterPipe,
+                QgsRectangle,
+            )
+        except ImportError as exc:  # pragma: no cover - production always has QGIS
+            return f"QGIS core unavailable: {exc}"
+
+        layer = item.get("layer_ref")
+        if layer is None or not layer.isValid():
+            return "Remote raster layer is not valid"
+
+        extent_tuple = item.get("raster_extent")
+        if not extent_tuple:
+            ext = layer.extent()
+            extent_tuple = (ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum())
+        extent = QgsRectangle(*extent_tuple)
+        if extent.isEmpty():
+            return "Remote raster extent is empty"
+
+        xres = float(item.get("raster_xres") or 0)
+        yres = float(item.get("raster_yres") or 0)
+        if xres <= 0 or yres <= 0:
+            provider0 = layer.dataProvider()
+            xres, yres = default_remote_resolution(
+                extent.width(),
+                extent.height(),
+                provider0.xSize() if provider0 else 0,
+                provider0.ySize() if provider0 else 0,
+            )
+        width = max(1, round(extent.width() / xres))
+        height = max(1, round(extent.height() / yres))
+
+        # Worker-owned provider copy: the pipe takes ownership of it.
+        provider = layer.dataProvider().clone()
+        pipe = QgsRasterPipe()
+        if not pipe.set(provider):
+            return "Cannot build raster pipe for remote layer"
+
+        tmp_dir = tempfile.mkdtemp(prefix="gpkgconv_")
+        tmp_tif = os.path.join(tmp_dir, "remote_snapshot.tif")
+        try:
+            writer = QgsRasterFileWriter(tmp_tif)
+            writer.setOutputFormat("GTiff")
+            err = writer.writeRaster(
+                pipe, width, height, extent, layer.crs(), QgsCoordinateTransformContext()
+            )
+            # NoError is unscoped in Qt5 builds, scoped in Qt6 builds.
+            no_error = getattr(QgsRasterFileWriter, "NoError", None)
+            if no_error is None:  # pragma: no cover - Qt6-only path
+                no_error = QgsRasterFileWriter.WriterError.NoError
+            if err != no_error:
+                return f"Remote raster snapshot failed (code {err})"
+            if not os.path.isfile(tmp_tif):
+                return "Remote raster snapshot produced no file"
+
+            return self._write_raster(
+                source_path=tmp_tif,
+                raster_table=raster_table,
+                output_path=output_path,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return f"Remote raster snapshot failed: {exc}"
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     # ------------------------------------------------------------------
     # GDAL-dependent write step (lazy import)
@@ -274,4 +437,11 @@ class RasterConverter:
             pass
 
 
-__all__ = ["RasterConverter", "TILE_FORMATS", "TILE_SIZES"]
+__all__ = [
+    "RasterConverter",
+    "TILE_FORMATS",
+    "TILE_SIZES",
+    "default_remote_resolution",
+    "estimate_remote_pixels",
+    "is_output_huge",
+]
