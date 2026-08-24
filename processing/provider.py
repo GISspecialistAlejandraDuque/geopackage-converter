@@ -13,10 +13,10 @@ from pathlib import Path
 from qgis.core import QgsProcessingProvider
 from qgis.PyQt.QtGui import QIcon
 
-_ICON_PATH = Path(__file__).resolve().parent.parent / "resources" / "icons" / "icon.svg"
-
 from .alg_from_folder import ConvertFolderToGeoPackageAlgorithm
 from .alg_from_project import ConvertProjectLayersToGeoPackageAlgorithm
+
+_ICON_PATH = Path(__file__).resolve().parent.parent / "resources" / "icons" / "icon.svg"
 
 
 class GeoPackageConverterProvider(QgsProcessingProvider):

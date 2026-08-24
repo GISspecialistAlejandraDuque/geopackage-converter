@@ -18,6 +18,7 @@ Design notes
 
 from __future__ import annotations
 
+import contextlib
 import os
 import time
 from dataclasses import dataclass, field
@@ -443,10 +444,9 @@ class Converter:
     ) -> None:
         if cb is None:
             return
-        try:
+        # Never let UI callback errors break the conversion.
+        with contextlib.suppress(Exception):
             cb(percent, message)
-        except Exception:  # noqa: BLE001 - never let UI errors break conversion
-            pass
 
 
 __all__ = ["Converter", "ConversionResult", "ProgressCallback"]

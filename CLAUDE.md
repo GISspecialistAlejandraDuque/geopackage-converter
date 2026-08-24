@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-QGIS plugin (v0.3.0) that batch-converts vector and raster files to GeoPackage. Supports QGIS 3.34+ (Qt5) through 4.x (Qt6). UI language is Italian (source), with English and Spanish translations. License: GPL-3.0-or-later.
+QGIS plugin (v0.3.1) that batch-converts vector and raster files to GeoPackage. Supports QGIS 3.34+ (Qt5) through 4.x (Qt6). UI language is Italian (source), with English and Spanish translations. License: GPL-3.0-or-later.
 
 Since 0.3.0 it also converts, in project mode, remote and non-file layers (WFS/OGC API Features, ArcGIS REST FeatureServer, memory, delimited-text/CSV, PostGIS, SpatiaLite as vectors; WCS/ArcGIS MapServer/WMS as rasters with editable extent/resolution), and reads `.rar` archives in folder mode via GDAL `/vsirar/`.
 

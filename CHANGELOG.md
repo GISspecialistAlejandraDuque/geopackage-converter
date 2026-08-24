@@ -31,6 +31,23 @@ Funzionalità valutate ma non implementate, da rivalutare in base al feedback d'
   ZIP fin dall'inizio). Estendere l'espansione anche ai raster interni, per
   entrambi i formati contemporaneamente, non in modo asimmetrico.
 
+## [0.3.1] — 2026-08-20
+
+Irrobustimento di sicurezza/qualità per lo scanner del repository ufficiale
+dei plugin QGIS (Bandit + Flake8). Nessuna modifica funzionale.
+
+### Corretto
+
+- Sostituiti i blocchi `try/except: pass` con `contextlib.suppress`
+  (segnalati da Bandit B110): callback di progresso, snapshot degli stili,
+  caricamento stile di default, teardown di menu/toolbar.
+- L'apertura della cartella/report di output ora usa
+  `QDesktopServices.openUrl` invece di `subprocess`/`os.startfile`
+  (segnalati da Bandit B603/B606/B607); più corretto e multipiattaforma.
+- Rimossi import inutilizzati (`typing.Callable`, `QgsLayerTree`,
+  `subprocess`, `sys`) e la variabile `result` non usata; sistemati gli
+  E402 in `processing/provider.py` e il nome di variabile ambiguo `l`.
+
 ## [0.3.0] — 2026-08-20
 
 Conversione di sorgenti remote e non-file dalla modalità progetto, e
