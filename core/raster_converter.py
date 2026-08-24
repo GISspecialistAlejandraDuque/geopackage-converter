@@ -21,10 +21,11 @@ Design notes
 
 from __future__ import annotations
 
+import contextlib
 import os
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from ._paths import long_path
 from .converter import ConversionResult, ProgressCallback
@@ -368,7 +369,7 @@ class RasterConverter:
 
                 if src_crs and src_crs != self.target_crs:
                     # Reproject + convert via gdalwarp.
-                    result = processing.run(
+                    processing.run(
                         "gdal:warpreproject",
                         {
                             "INPUT": source_path,
@@ -385,7 +386,7 @@ class RasterConverter:
                     )
                 else:
                     # Same CRS — just translate.
-                    result = processing.run(
+                    processing.run(
                         "gdal:translate",
                         {
                             "INPUT": source_path,
@@ -399,7 +400,7 @@ class RasterConverter:
                         },
                     )
             else:
-                result = processing.run(
+                processing.run(
                     "gdal:translate",
                     {
                         "INPUT": source_path,
@@ -431,10 +432,9 @@ class RasterConverter:
     ) -> None:
         if cb is None:
             return
-        try:
+        # Never let UI callback errors break the conversion.
+        with contextlib.suppress(Exception):
             cb(percent, message)
-        except Exception:  # noqa: BLE001
-            pass
 
 
 __all__ = [

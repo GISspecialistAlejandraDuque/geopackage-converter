@@ -5,6 +5,7 @@ into one or more GeoPackages.
 
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 
@@ -93,7 +94,8 @@ def _layer_to_item(layer) -> dict:
         item["path"] = None
 
     # Snapshot the live style XML for the converter.
-    try:
+    # Style snapshot is best-effort: a failure must never block conversion.
+    with contextlib.suppress(Exception):
         from qgis.PyQt.QtXml import QDomDocument
 
         doc = QDomDocument()
@@ -101,8 +103,6 @@ def _layer_to_item(layer) -> dict:
         xml = doc.toString()
         if xml:
             item["style_xml"] = xml
-    except Exception:
-        pass
     return item
 
 

@@ -10,6 +10,7 @@ Registers:
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 from typing import Optional
 
@@ -107,15 +108,13 @@ class GeoPackageConverterPlugin:
 
     def unload(self) -> None:
         for action in self._actions:
-            try:
+            # Menu/toolbar teardown is best-effort: QGIS may already have
+            # destroyed the widgets during shutdown.
+            with contextlib.suppress(Exception):
                 self.iface.removePluginVectorMenu(self.MENU_NAME, action)
-            except Exception:  # noqa: BLE001
-                pass
-            try:
+            with contextlib.suppress(Exception):
                 if self._toolbar is not None:
                     self._toolbar.removeAction(action)
-            except Exception:  # noqa: BLE001
-                pass
         self._actions.clear()
 
         if self._toolbar is not None:

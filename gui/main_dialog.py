@@ -12,9 +12,8 @@ UX hardening (Phase 11.5):
 
 from __future__ import annotations
 
+import contextlib
 import os
-import subprocess
-import sys
 import tempfile
 import webbrowser
 from pathlib import Path
@@ -416,8 +415,8 @@ class GeoPackageConverterDialog(QDialog):
         if project is None:
             return
         supported = [
-            l for l in project.mapLayers().values()
-            if l.type() in (QgsMapLayer.VectorLayer, QgsMapLayer.RasterLayer)
+            lyr for lyr in project.mapLayers().values()
+            if lyr.type() in (QgsMapLayer.VectorLayer, QgsMapLayer.RasterLayer)
         ]
         if not supported:
             placeholder = QListWidgetItem(self.tr("(nessun layer vettoriale o raster nel progetto)"))
@@ -1321,7 +1320,7 @@ class GeoPackageConverterDialog(QDialog):
         This snapshot is used after conversion to reload the GPKG layers
         in the same visual order the user had in the project.
         """
-        from qgis.core import QgsLayerTree, QgsLayerTreeLayer, QgsLayerTreeGroup
+        from qgis.core import QgsLayerTreeLayer, QgsLayerTreeGroup
 
         snapshot: list = []
         for child in root.children():
@@ -1407,7 +1406,8 @@ class GeoPackageConverterDialog(QDialog):
 
         # Snapshot the live style XML so the converter can persist *the
         # user's symbology*, not a default re-derived from the file.
-        try:
+        # Best-effort: a style failure must never block conversion.
+        with contextlib.suppress(Exception):
             from qgis.PyQt.QtXml import QDomDocument
 
             doc = QDomDocument()
@@ -1415,8 +1415,6 @@ class GeoPackageConverterDialog(QDialog):
             xml = doc.toString()
             if xml:
                 item["style_xml"] = xml
-        except Exception:  # noqa: BLE001 - style snapshot is best-effort
-            pass
         return item
 
     def _build_raster_project_item(self, layer, legend_group: str) -> dict:
@@ -1493,7 +1491,8 @@ class GeoPackageConverterDialog(QDialog):
             and self.iface is not None
         )
         if use_canvas:
-            try:
+            # Any failure here simply falls back to the full layer extent.
+            with contextlib.suppress(Exception):
                 from qgis.core import (
                     QgsCoordinateTransform,
                     QgsProject,
@@ -1512,8 +1511,6 @@ class GeoPackageConverterDialog(QDialog):
                 canvas_extent = canvas_extent.intersect(ext)
                 if not canvas_extent.isEmpty():
                     ext = canvas_extent
-            except Exception:  # noqa: BLE001 - fall back to full extent
-                pass
 
         extent_tuple = (ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum())
 
@@ -1909,10 +1906,8 @@ class GeoPackageConverterDialog(QDialog):
             if layer is None or not layer.isValid():
                 failed += 1
                 continue
-            try:
+            with contextlib.suppress(Exception):
                 layer.loadDefaultStyle()
-            except Exception:  # noqa: BLE001
-                pass
             # Raster styles cannot be saved inside GeoPackage (GDAL
             # limitation).  Copy the full style (renderer, opacity,
             # resampling, brightness/contrast …) from the original
@@ -1979,10 +1974,8 @@ class GeoPackageConverterDialog(QDialog):
                 if layer is None or not layer.isValid():
                     failed += 1
                     continue
-                try:
+                with contextlib.suppress(Exception):
                     layer.loadDefaultStyle()
-                except Exception:  # noqa: BLE001
-                    pass
                 project.addMapLayer(layer, addToLegend=False)
                 target.addLayer(layer)
                 added += 1
@@ -2000,10 +1993,8 @@ class GeoPackageConverterDialog(QDialog):
                 if layer is None or not layer.isValid():
                     failed += 1
                     continue
-                try:
+                with contextlib.suppress(Exception):
                     layer.loadDefaultStyle()
-                except Exception:  # noqa: BLE001
-                    pass
                 project.addMapLayer(layer, addToLegend=False)
                 parent_group.addLayer(layer)
                 added += 1
@@ -2074,12 +2065,10 @@ class GeoPackageConverterDialog(QDialog):
 
     @staticmethod
     def _open_path_in_explorer(path: Path) -> None:
-        try:
-            if sys.platform.startswith("win"):
-                os.startfile(str(path))  # type: ignore[attr-defined]
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", str(path)])
-            else:
-                subprocess.Popen(["xdg-open", str(path)])
-        except Exception as exc:  # noqa: BLE001
-            QgsMessageLog.logMessage(f"Cannot open folder {path}: {exc}", LOG_TAG)
+        # Use Qt's cross-platform "open in the system file manager" instead
+        # of spawning os.startfile / open / xdg-open subprocesses.
+        from qgis.PyQt.QtCore import QUrl
+        from qgis.PyQt.QtGui import QDesktopServices
+
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+            QgsMessageLog.logMessage(f"Cannot open folder {path}", LOG_TAG)
