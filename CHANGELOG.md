@@ -31,6 +31,25 @@ Funzionalità valutate ma non implementate, da rivalutare in base al feedback d'
   ZIP fin dall'inizio). Estendere l'espansione anche ai raster interni, per
   entrambi i formati contemporaneamente, non in modo asimmetrico.
 
+## [0.3.2] — 2026-08-24
+
+Compatibilità Qt6 completa per il controllo "QGIS 4 Ready" del repository
+ufficiale. Nessuna modifica funzionale.
+
+### Corretto
+
+- Tutti gli enum convertiti alla forma con ambito, valida sia su Qt5 sia
+  su Qt6: `QgsMapLayer.LayerType.*`, `QgsTask.Flag.CanCancel`,
+  `QMessageBox.StandardButton.*`, `QgsProjectionSelectionWidget.CrsOption.
+  CrsNotSet`, `QgsProcessing.SourceType.TypeMapLayer`,
+  `QgsProcessingParameterNumber.Type.*`, `QgsProcessingParameterFile.
+  Behavior.Folder`, `QgsVectorFileWriter.WriterError.NoError`,
+  `QgsVectorFileWriter.ActionOnExistingFile.CreateOrOverwriteLayer`,
+  `QgsRasterFileWriter.WriterError.NoError` (21 occorrenze).
+- Verificato con smoke test su QGIS 3.44 (Qt 5.15) e QGIS 4.2 (Qt 6.11):
+  enum risolti, algoritmi di Processing costruiti, conversione doppia con
+  append riuscita su entrambi.
+
 ## [0.3.1] — 2026-08-20
 
 Irrobustimento di sicurezza/qualità per lo scanner del repository ufficiale

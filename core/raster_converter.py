@@ -301,11 +301,8 @@ class RasterConverter:
             err = writer.writeRaster(
                 pipe, width, height, extent, layer.crs(), QgsCoordinateTransformContext()
             )
-            # NoError is unscoped in Qt5 builds, scoped in Qt6 builds.
-            no_error = getattr(QgsRasterFileWriter, "NoError", None)
-            if no_error is None:  # pragma: no cover - Qt6-only path
-                no_error = QgsRasterFileWriter.WriterError.NoError
-            if err != no_error:
+            # Scoped enum form works on both Qt5 and Qt6 builds.
+            if err != QgsRasterFileWriter.WriterError.NoError:
                 return f"Remote raster snapshot failed (code {err})"
             if not os.path.isfile(tmp_tif):
                 return "Remote raster snapshot produced no file"

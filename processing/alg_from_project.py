@@ -241,7 +241,7 @@ class ConvertProjectLayersToGeoPackageAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterMultipleLayers(
                 self.INPUT_LAYERS,
                 "Layer da convertire",
-                layerType=QgsProcessing.TypeMapLayer,
+                layerType=QgsProcessing.SourceType.TypeMapLayer,
             )
         )
         self.addParameter(
@@ -293,7 +293,7 @@ class ConvertProjectLayersToGeoPackageAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterNumber(
                 self.JPEG_QUALITY,
                 "Qualità JPEG/WebP (1–100)",
-                type=QgsProcessingParameterNumber.Integer,
+                type=QgsProcessingParameterNumber.Type.Integer,
                 defaultValue=75,
                 minValue=1,
                 maxValue=100,
@@ -311,7 +311,7 @@ class ConvertProjectLayersToGeoPackageAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterNumber(
                 self.REMOTE_PIXEL_SIZE,
                 "Risoluzione raster remoti (unità CRS, 0 = nativa/auto)",
-                type=QgsProcessingParameterNumber.Double,
+                type=QgsProcessingParameterNumber.Type.Double,
                 defaultValue=0.0,
                 minValue=0.0,
                 optional=True,
@@ -348,7 +348,7 @@ class ConvertProjectLayersToGeoPackageAlgorithm(QgsProcessingAlgorithm):
         # Build items — distinguish vector from raster.
         items = []
         for layer in layers:
-            if layer.type() == QgsMapLayer.RasterLayer:
+            if layer.type() == QgsMapLayer.LayerType.RasterLayer:
                 # The REMOTE_EXTENT is resolved per layer in the layer's CRS
                 # so the Processing framework handles the transform for us.
                 remote_extent = None

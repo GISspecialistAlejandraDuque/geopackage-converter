@@ -328,7 +328,7 @@ class Converter:
         except Exception as exc:  # noqa: BLE001
             return f"Writer raised: {exc}"
 
-        if error_code != QgsVectorFileWriter.NoError:
+        if error_code != QgsVectorFileWriter.WriterError.NoError:
             return error_message or f"Writer returned error code {error_code}"
 
         if self.save_styles:
@@ -362,7 +362,7 @@ class Converter:
         options.fileEncoding = encoding
         if output_exists:
             options.actionOnExistingFile = (
-                QgsVectorFileWriter.CreateOrOverwriteLayer
+                QgsVectorFileWriter.ActionOnExistingFile.CreateOrOverwriteLayer
             )
         return options
 
