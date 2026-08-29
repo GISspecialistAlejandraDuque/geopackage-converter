@@ -93,7 +93,7 @@ class _ScanTask(QgsTask):
         folder: Path,
         mirror_hierarchy: bool = False,
     ) -> None:
-        super().__init__("GeoPackage Converter scan", QgsTask.CanCancel)
+        super().__init__("GeoPackage Converter scan", QgsTask.Flag.CanCancel)
         self._folder = folder
         self._mirror = mirror_hierarchy
         self.results: List[dict] = []
@@ -128,7 +128,7 @@ class _ConversionTask(QgsTask):
         raster_converter: Optional[RasterConverter] = None,
         project_name: str = "",
     ) -> None:
-        super().__init__("GeoPackage Converter conversion", QgsTask.CanCancel)
+        super().__init__("GeoPackage Converter conversion", QgsTask.Flag.CanCancel)
         self._items = items
         self._output_path = output_path
         self._grouping_index = grouping_index
@@ -403,7 +403,7 @@ class GeoPackageConverterDialog(QDialog):
         """Configure the QgsProjectionSelectionWidget with sane defaults for Italy."""
         # Allow the "no reprojection" choice and label it clearly.
         self.crsSelector.setOptionVisible(
-            QgsProjectionSelectionWidget.CrsNotSet, True
+            QgsProjectionSelectionWidget.CrsOption.CrsNotSet, True
         )
         self.crsSelector.setNotSetText(self.tr("(nessuna riproiezione)"))
         # Default to "no reprojection" (invalid CRS).
@@ -416,7 +416,7 @@ class GeoPackageConverterDialog(QDialog):
             return
         supported = [
             lyr for lyr in project.mapLayers().values()
-            if lyr.type() in (QgsMapLayer.VectorLayer, QgsMapLayer.RasterLayer)
+            if lyr.type() in (QgsMapLayer.LayerType.VectorLayer, QgsMapLayer.LayerType.RasterLayer)
         ]
         if not supported:
             placeholder = QListWidgetItem(self.tr("(nessun layer vettoriale o raster nel progetto)"))
@@ -425,7 +425,7 @@ class GeoPackageConverterDialog(QDialog):
             return
         for layer in supported:
             crs = layer.crs().authid() if layer.crs().isValid() else "?"
-            is_raster = layer.type() == QgsMapLayer.RasterLayer
+            is_raster = layer.type() == QgsMapLayer.LayerType.RasterLayer
             provider = layer.providerType()
             # Non-file layers (WFS, ArcGIS REST, WCS, memory, CSV, PostGIS…)
             # get a provider marker so the user sees they will be
@@ -957,7 +957,7 @@ class GeoPackageConverterDialog(QDialog):
                     continue
                 layer_id = wi.data(Qt.ItemDataRole.UserRole)
                 layer = project.mapLayer(layer_id) if (project and layer_id) else None
-                if layer is not None and layer.type() == QgsMapLayer.RasterLayer:
+                if layer is not None and layer.type() == QgsMapLayer.LayerType.RasterLayer:
                     has_raster = True
                     if route_for_provider(layer.providerType(), is_raster=True) == ROUTE_REMOTE_RASTER:
                         remote_rasters.append(layer)
@@ -1030,7 +1030,7 @@ class GeoPackageConverterDialog(QDialog):
             layer = project.mapLayer(layer_id) if (project and layer_id) else None
             if (
                 layer is not None
-                and layer.type() == QgsMapLayer.RasterLayer
+                and layer.type() == QgsMapLayer.LayerType.RasterLayer
                 and route_for_provider(layer.providerType(), is_raster=True) == ROUTE_REMOTE_RASTER
             ):
                 out.append(layer)
@@ -1299,7 +1299,7 @@ class GeoPackageConverterDialog(QDialog):
                 node = root.findLayer(layer.id())
                 if node is not None and node.parent() is not None and node.parent() != root:
                     legend_group = node.parent().name() or ""
-            if layer.type() == QgsMapLayer.RasterLayer:
+            if layer.type() == QgsMapLayer.LayerType.RasterLayer:
                 items.append(self._build_raster_project_item(layer, legend_group))
             elif isinstance(layer, QgsVectorLayer):
                 items.append(self._build_project_item(layer, legend_group))
@@ -1562,10 +1562,10 @@ class GeoPackageConverterDialog(QDialog):
                 "e il download potrebbe richiedere molto tempo o spazio.\n\n"
                 "Vuoi continuare?"
             ),
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
-        return reply == QMessageBox.Yes
+        return reply == QMessageBox.StandardButton.Yes
 
     def _run(self) -> None:
         items = self._collect_items()

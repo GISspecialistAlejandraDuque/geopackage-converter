@@ -92,7 +92,7 @@ class ConvertFolderToGeoPackageAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterFile(
                 self.INPUT_FOLDER,
                 "Cartella di input",
-                behavior=QgsProcessingParameterFile.Folder,
+                behavior=QgsProcessingParameterFile.Behavior.Folder,
             )
         )
         self.addParameter(
@@ -147,7 +147,7 @@ class ConvertFolderToGeoPackageAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterNumber(
                 self.JPEG_QUALITY,
                 "Qualità JPEG/WebP (1–100)",
-                type=QgsProcessingParameterNumber.Integer,
+                type=QgsProcessingParameterNumber.Type.Integer,
                 defaultValue=75,
                 minValue=1,
                 maxValue=100,

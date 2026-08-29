@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-QGIS plugin (v0.3.1) that batch-converts vector and raster files to GeoPackage. Supports QGIS 3.34+ (Qt5) through 4.x (Qt6). UI language is Italian (source), with English and Spanish translations. License: GPL-3.0-or-later.
+QGIS plugin (v0.3.2) that batch-converts vector and raster files to GeoPackage. Supports QGIS 3.34+ (Qt5) through 4.x (Qt6). UI language is Italian (source), with English and Spanish translations. License: GPL-3.0-or-later.
 
 Since 0.3.0 it also converts, in project mode, remote and non-file layers (WFS/OGC API Features, ArcGIS REST FeatureServer, memory, delimited-text/CSV, PostGIS, SpatiaLite as vectors; WCS/ArcGIS MapServer/WMS as rasters with editable extent/resolution), and reads `.rar` archives in folder mode via GDAL `/vsirar/`.
 
@@ -74,7 +74,7 @@ processing/
 
 ## Key Design Patterns
 
-- **Qt5/Qt6 compatibility**: All differences are in `compat.py`. Import from there, never branch on Qt version elsewhere.
+- **Qt5/Qt6 compatibility**: All differences are in `compat.py`. Import from there, never branch on Qt version elsewhere. **Always write enums in their scoped form** (`QgsMapLayer.LayerType.RasterLayer`, `QMessageBox.StandardButton.Yes`, `QgsTask.Flag.CanCancel`, …): the unscoped spelling is removed in Qt6 and flagged by the plugin repository's "QGIS 4 Ready" check; the scoped form works on both Qt5 and Qt6.
 - **Error accumulation**: `Converter.convert()` never raises on per-item failures. Errors are collected in `ConversionResult.errors`. Check `result.error_count`.
 - **Lazy QGIS imports in core/**: Core modules isolate QGIS imports inside functions (not at module top) so `pytest` can run without a QGIS runtime. Tests in `tests/` monkeypatch QGIS-dependent calls.
 - **Raster style limitation**: GeoPackage cannot store raster styles (GDAL limitation). In project mode, the plugin clones the full style from the original layer via `exportNamedStyle`/`importNamedStyle` after loading the converted raster.
